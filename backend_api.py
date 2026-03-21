@@ -576,15 +576,16 @@ def run_bridge_script():
 
 def generate_fallback_signal():
     try:
-        conviction = 7.5
-        direction = 1
+        # Neutral fallback — never force a directional bias when data is unavailable
+        conviction = 0.0
+        direction = 0  # 0 = NONE, prevents accidental trades on stale/missing data
 
         if os.path.exists(SIGNAL_FILE_API):
             try:
                 with open(SIGNAL_FILE_API, 'r') as f:
                     old_signal = json.load(f)
-                    conviction = old_signal.get('conviction_score', 7.5)
-                    direction = old_signal.get('direction', 1)
+                    conviction = old_signal.get('conviction_score', 0.0)
+                    direction = old_signal.get('direction', 0)  # default neutral
             except:
                 pass
 
