@@ -25,7 +25,9 @@
 #include "GoldML_ICT_Detector.mqh"
 #include "GoldML_SniperEntry_M15.mqh"
 #include "GoldML_PositionManager_V2.mqh"
-#include "GoldML_QualityFilters.mqh"         
+#include "GoldML_QualityFilters.mqh"
+// AUDIT-C1: Robust JSON parser replaces fragile StringFind approach
+#include "GoldML_JsonParser.mqh"
 
 CTrade trade;
 CPositionInfo posInfo;
@@ -37,9 +39,12 @@ CQualityFilters* g_filters = NULL;
 //| API CONFIGURATION                                                 |
 //+------------------------------------------------------------------+
 input group "â•â•â• API NEWS TRADING â•â•â•"
-input string API_News_URL = "http://86.48.5.126:5002/news_trading_signal/quick";
+// AUDIT-VPS-C4: Default URL updated to versioned endpoint
+input string API_News_URL = "http://86.48.5.126:5002/v1/news_trading_signal/quick";
 input int    API_Timeout = 5000;
 input int    API_Refresh_Seconds = 30;
+// AUDIT-VPS-C1: Bearer token for API authentication — set in EA inputs, never hardcode
+input string API_Auth_Token = "";  // Set to your API_TOKEN value
 
 //+------------------------------------------------------------------+
 //| TRADING RULES                                                     |
@@ -86,7 +91,11 @@ input double Trail_ATR_Mult = 1.5;
 //| RISK MANAGEMENT FTMO                                              |
 //+------------------------------------------------------------------+
 input group "â•â•â• RISK MANAGEMENT FTMO â•â•â•"
-input double Base_Lot_Size = 0.10;
+// AUDIT-C4: Dynamic sizing by risk % replaces fixed lot size
+input double Risk_Percent    = 1.0;   // % of equity risked per trade (default 1%)
+input double Max_Risk_Percent = 2.0;  // Hard cap on risk % per trade
+// AUDIT-C4: DEPRECATED — kept for backwards compatibility only; ignored when Risk_Percent > 0
+input double Base_Lot_Size = 0.10;    // DEPRECATED: use Risk_Percent instead
 input int    Magic_Number = 888892;
 input double Max_Daily_Loss_EUR = 400.0;
 input double Max_Daily_Trades = 6;
@@ -246,6 +255,10 @@ int OnInit() {
    EventSetTimer(60);
    Print("â±ï¸ Timer initialized: API health check every 60s");
    
+   // AUDIT-C5: Resync open positions and daily stats on restart
+   SyncOpenPositions();
+   RecalcDailyStats();
+
    return INIT_SUCCEEDED;
 }
 
@@ -381,7 +394,10 @@ void OnTimer() {
 //| FETCH NEWS SIGNAL FROM API                                        |
 //+------------------------------------------------------------------+
 bool FetchNewsSignal() {
+   // AUDIT-VPS-C1: Include Bearer token if configured
    string headers = "Content-Type: application/json\r\n";
+   if(StringLen(API_Auth_Token) > 0)
+      headers += "Authorization: Bearer " + API_Auth_Token + "\r\n";
    string result_headers;
    char post_data[];
    char result_data[];
@@ -433,64 +449,86 @@ bool FetchNewsSignal() {
 //| PARSE JSON RESPONSE                                               |
 //+------------------------------------------------------------------+
 bool ParseSignalJSON(string json) {
-   // CORRECTION 13: Validation JSON basique
    if(StringLen(json) < 10) {
-      Print("âš ï¸ ParseSignalJSON: JSON too short");
+      Print("WARNING ParseSignalJSON: JSON too short");
       return false;
    }
-   
-   // can_trade
-   g_Signal.can_trade = (StringFind(json, "\"can_trade\": true") >= 0 ||
-                         StringFind(json, "\"can_trade\":true") >= 0);
-   
+
+   // AUDIT-C1: Use CJsonParser — robust, whitespace/space-tolerant, handles null values
+   CJsonParser parser;
+   if(!parser.Parse(json)) {
+      Print("WARNING ParseSignalJSON: CJsonParser failed to parse JSON");
+      return false;
+   }
+
+   // AUDIT-VPS-C3: Log HMAC signature if present (full verification requires MQL5 native HMAC lib)
+   string signature = "";
+   if(parser.GetString("signature", signature) && StringLen(signature) > 0) {
+      Print("[AUDIT-C1] Response signature present: ", StringSubstr(signature, 0, 16), "...");
+   }
+
+   // can_trade — AUDIT-C1: GetBool tolerates any spacing around ':'
+   bool canTrade = false;
+   if(!parser.GetBool("can_trade", canTrade))
+      canTrade = false;
+   g_Signal.can_trade = canTrade;
+
    // direction
-   g_Signal.direction = ExtractString(json, "direction");
-   
+   string direction = "NONE";
+   parser.GetString("direction", direction);
+   g_Signal.direction = direction;
+
    // bias
-   g_Signal.bias = ExtractString(json, "bias");
-   
+   string bias = "NEUTRAL";
+   parser.GetString("bias", bias);
+   g_Signal.bias = bias;
+
    // confidence
-   g_Signal.confidence = ExtractDouble(json, "confidence");
-   
-   // CORRECTION 14: Validation confidence range
-   if(g_Signal.confidence < 0) g_Signal.confidence = 0;
-   if(g_Signal.confidence > 100) g_Signal.confidence = 100;
-   
+   double confidence = 0;
+   parser.GetDouble("confidence", confidence);
+   if(confidence < 0) confidence = 0;
+   if(confidence > 100) confidence = 100;
+   g_Signal.confidence = confidence;
+
    // size_factor
-   g_Signal.size_factor = ExtractDouble(json, "size_factor");
-   if(g_Signal.size_factor <= 0) g_Signal.size_factor = 1.0;
-   if(g_Signal.size_factor > 2.0) g_Signal.size_factor = 2.0;  // Cap safety
-   
+   double sizeFactor = 1.0;
+   if(!parser.GetDouble("size_factor", sizeFactor) || sizeFactor <= 0)
+      sizeFactor = 1.0;
+   if(sizeFactor > 2.0) sizeFactor = 2.0;
+   g_Signal.size_factor = sizeFactor;
+
    // timing_mode
-   g_Signal.timing_mode = ExtractString(json, "timing_mode");
-   
-   // CORRECTION 15: Validation timing_mode
-   if(g_Signal.timing_mode != "CLEAR" && 
-      g_Signal.timing_mode != "BLACKOUT" &&
-      g_Signal.timing_mode != "PRE_NEWS_SETUP" &&
-      g_Signal.timing_mode != "POST_NEWS_ENTRY") {
-      g_Signal.timing_mode = "CLEAR";  // Default safe
+   string timingMode = "CLEAR";
+   parser.GetString("timing_mode", timingMode);
+   if(timingMode != "CLEAR" &&
+      timingMode != "BLACKOUT" &&
+      timingMode != "PRE_NEWS_SETUP" &&
+      timingMode != "POST_NEWS_ENTRY") {
+      timingMode = "CLEAR";  // Default safe
    }
-   
+   g_Signal.timing_mode = timingMode;
+
    // tp_mode
-   g_Signal.tp_mode = ExtractString(json, "tp_mode");
-   if(g_Signal.tp_mode != "QUICK" &&
-      g_Signal.tp_mode != "NORMAL" &&
-      g_Signal.tp_mode != "EXTENDED") {
-      g_Signal.tp_mode = "NORMAL";  // Default
-   }
-   
-   // wider_stops
-   g_Signal.wider_stops = (StringFind(json, "\"wider_stops\": true") >= 0 ||
-                           StringFind(json, "\"wider_stops\":true") >= 0);
-   
+   string tpMode = "NORMAL";
+   parser.GetString("tp_mode", tpMode);
+   if(tpMode != "QUICK" && tpMode != "NORMAL" && tpMode != "EXTENDED")
+      tpMode = "NORMAL";
+   g_Signal.tp_mode = tpMode;
+
+   // wider_stops — AUDIT-C1: GetBool handles all spacing variants
+   bool widerStops = false;
+   parser.GetBool("wider_stops", widerStops);
+   g_Signal.wider_stops = widerStops;
+
    // blackout_minutes
-   g_Signal.blackout_minutes = (int)ExtractDouble(json, "blackout_minutes");
-   if(g_Signal.blackout_minutes < 0) g_Signal.blackout_minutes = 0;
-   
-   g_Signal.is_valid = true;
+   int blackoutMin = 0;
+   parser.GetInt("blackout_minutes", blackoutMin);
+   if(blackoutMin < 0) blackoutMin = 0;
+   g_Signal.blackout_minutes = blackoutMin;
+
+   g_Signal.is_valid    = true;
    g_Signal.last_update = TimeCurrent();
-   
+
    return true;
 }
 
@@ -617,55 +655,107 @@ void CheckEntry() {
 //+------------------------------------------------------------------+
 void ExecuteTrade(string direction) {
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   
+
    // CORRECTION 19: Validation point
    if(point <= 0) {
-      Print("âŒ ExecuteTrade: Invalid point (", point, ")");
+      Print("ExecuteTrade: Invalid point (", point, ")");
       return;
    }
-   
+
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
+
    // CORRECTION 20: Validation prices
    if(ask <= 0 || bid <= 0) {
-      Print("âŒ ExecuteTrade: Invalid prices (ask:", ask, " bid:", bid, ")");
+      Print("ExecuteTrade: Invalid prices (ask:", ask, " bid:", bid, ")");
       return;
    }
-   
-   // Calculate lot size
-   double lots = Base_Lot_Size * g_Signal.size_factor;
-   
-   // Normalize
-   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   
-   if(lotStep <= 0) lotStep = 0.01;  // Fallback
-   
-   lots = MathFloor(lots / lotStep) * lotStep;
-   if(lots < minLot) lots = minLot;
-   if(lots > maxLot) lots = maxLot;
-   
-   // Get SL from Sniper
+
+   // Get SL from Sniper (needed for lot calculation)
    double slPips = g_LastSniper.slPips;
-   
+
    // CORRECTION 21: Validation SL
    if(slPips < Sniper_SL_Min_Pips) slPips = Sniper_SL_Min_Pips;
    if(slPips > Sniper_SL_Max_Pips) slPips = Sniper_SL_Max_Pips;
-   
+
    // Apply wider stops if indicated
    if(g_Signal.wider_stops) {
       slPips *= 1.3;
    }
-   
+
+   // ---------------------------------------------------------------
+   // AUDIT-C4: Dynamic lot sizing from Risk_Percent
+   // ---------------------------------------------------------------
+   double lots = 0;
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(lotStep <= 0) lotStep = 0.01;
+
+   // Clamp risk to safety cap
+   double effectiveRisk = Risk_Percent;
+   if(effectiveRisk <= 0) effectiveRisk = 1.0;
+   if(effectiveRisk > Max_Risk_Percent) effectiveRisk = Max_Risk_Percent;
+
+   double equity       = AccountInfoDouble(ACCOUNT_EQUITY);
+   double tickValue    = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize     = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   if(equity > 0 && tickValue > 0 && tickSize > 0 && slPips > 0) {
+      // AUDIT-C4: Deprecation warning for Base_Lot_Size
+      if(Base_Lot_Size != 0.10) {
+         Print("[AUDIT-C4] WARNING: Base_Lot_Size is deprecated. Use Risk_Percent instead.");
+      }
+
+      double riskAmount = equity * (effectiveRisk / 100.0) * g_Signal.size_factor;
+      lots = riskAmount / (slPips * (tickValue / tickSize));
+
+      // AUDIT-C4: Log the calculation for audit trail
+      Print("[AUDIT-C4] Lot calc: equity=", DoubleToString(equity, 2),
+            " risk%=", DoubleToString(effectiveRisk, 2),
+            " risk_amount=", DoubleToString(riskAmount, 2),
+            " SL_pips=", DoubleToString(slPips, 1),
+            " raw_lots=", DoubleToString(lots, 4));
+   } else {
+      // Fallback to Base_Lot_Size if equity/tick data unavailable
+      Print("[AUDIT-C4] WARNING: falling back to Base_Lot_Size (equity or tick data unavailable)");
+      lots = Base_Lot_Size * g_Signal.size_factor;
+   }
+
+   // Normalize and clamp
+   lots = MathFloor(lots / lotStep) * lotStep;
+   if(lots < minLot) lots = minLot;
+   if(lots > maxLot) lots = maxLot;
+
+   Print("[AUDIT-C4] Final lots: ", DoubleToString(lots, 2));
+
+   // ---------------------------------------------------------------
+   // AUDIT-C4: Margin check before sending order
+   // ---------------------------------------------------------------
+   double marginRequired = 0;
+   ENUM_ORDER_TYPE orderType = (direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double checkPrice = (direction == "BUY") ? ask : bid;
+
+   if(OrderCalcMargin(orderType, _Symbol, lots, checkPrice, marginRequired)) {
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      double marginSafe = freeMargin * 0.8;  // 80% safety threshold
+      if(marginRequired > marginSafe) {
+         Print("[AUDIT-C4] BLOCKED: insufficient margin. Required=",
+               DoubleToString(marginRequired, 2),
+               " Available(80%)=", DoubleToString(marginSafe, 2));
+         return;
+      }
+   } else {
+      Print("[AUDIT-C4] WARNING: OrderCalcMargin failed — proceeding without margin check");
+   }
+
    // Calculate TP based on tp_mode
    double tpRR = 1.5;  // Default
    if(g_Signal.tp_mode == "QUICK") tpRR = 1.0;
    else if(g_Signal.tp_mode == "EXTENDED") tpRR = 2.5;
-   
+
    double tpPips = slPips * tpRR;
-   
+
    // Calculate prices
    double entry, sl, tp;
    if(direction == "BUY") {
@@ -677,23 +767,23 @@ void ExecuteTrade(string direction) {
       sl = entry + slPips * point * 10;
       tp = entry - tpPips * point * 10;
    }
-   
-   // CORRECTION 22: Normaliser SL/TP selon SYMBOL_DIGITS
+
+   // CORRECTION 22: Normalize SL/TP
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   sl = NormalizeDouble(sl, digits);
-   tp = NormalizeDouble(tp, digits);
+   sl    = NormalizeDouble(sl, digits);
+   tp    = NormalizeDouble(tp, digits);
    entry = NormalizeDouble(entry, digits);
-   
+
    // Build comment
-   string comment = StringFormat("GML_%s_%s_%.0f", 
-                                  g_Signal.timing_mode, 
-                                  direction, 
+   string comment = StringFormat("GML_%s_%s_%.0f",
+                                  g_Signal.timing_mode,
+                                  direction,
                                   g_Signal.confidence);
-   
+
    // Log
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
-   Print("   ðŸŽ¯ EXECUTING TRADE");
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+   Print("===========================================================");
+   Print("   EXECUTING TRADE");
+   Print("===========================================================");
    Print("   Timing Mode: ", g_Signal.timing_mode);
    Print("   Direction: ", direction);
    Print("   Confidence: ", DoubleToString(g_Signal.confidence, 0), "%");
@@ -705,8 +795,8 @@ void ExecuteTrade(string direction) {
    Print("   RR: 1:", DoubleToString(tpRR, 1));
    Print("   Sniper M15 Score: ", g_LastSniper.score);
    Print("   M5 Pattern: ", g_LastSniper.m5Confirm.patternName);
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
-   
+   Print("===========================================================");
+
    // Execute
    bool success = false;
    if(direction == "BUY") {
@@ -714,26 +804,26 @@ void ExecuteTrade(string direction) {
    } else {
       success = trade.Sell(lots, _Symbol, entry, sl, tp, comment);
    }
-   
+
    if(success) {
       g_Ticket = trade.ResultOrder();
       g_InPosition = true;
       g_CurrentDirection = direction;
       g_TradesToday++;
-      
-      Print("âœ… TRADE OPENED - Ticket: ", g_Ticket);
-      
+
+      Print("TRADE OPENED - Ticket: ", g_Ticket);
+
       if(g_filters != NULL) {
          g_filters.RecordTradeOpen(g_Ticket, direction, entry);
       }
-      
+
       if(Enable_Alerts) {
          Alert("Gold Institutional: ", direction, " @ ", DoubleToString(entry, 2),
                " | Mode: ", g_Signal.timing_mode,
                " | Conf: ", DoubleToString(g_Signal.confidence, 0), "%");
       }
    } else {
-      // CORRECTION 23: Meilleure gestion erreur trade
+      // CORRECTION 23: Better error handling
       int error = GetLastError();
       string errorDesc = "";
       switch(error) {
@@ -748,7 +838,7 @@ void ExecuteTrade(string direction) {
          case 10021: errorDesc = "Order too many"; break;
          default:    errorDesc = "Unknown error";
       }
-      Print("âŒ TRADE FAILED - Error: ", error, " (", errorDesc, ")");
+      Print("TRADE FAILED - Error: ", error, " (", errorDesc, ")");
    }
 }
 
@@ -1080,4 +1170,94 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       }
    }
 }
+
+//+------------------------------------------------------------------+
+//| SYNC OPEN POSITIONS ON RESTART                                    |
+//| AUDIT-C5: Restore g_InPosition state if EA restarts with a live  |
+//|           position already open on the account.                  |
+//+------------------------------------------------------------------+
+void SyncOpenPositions() {
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++) {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      long magic = PositionGetInteger(POSITION_MAGIC);
+      if(magic != Magic_Number) continue;
+
+      string sym = PositionGetString(POSITION_SYMBOL);
+      if(sym != _Symbol) continue;
+
+      // AUDIT-C5: Found a managed position — restore state
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      string tradeType = (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+
+      g_InPosition       = true;
+      g_Ticket           = ticket;
+      g_CurrentDirection = tradeType;
+
+      // Resume Position Manager management of this position
+      if(g_posMgr != NULL) {
+         g_posMgr.LoadPosition(ticket, tradeType);
+      }
+
+      Print("[AUDIT-C5] Resumed management of position #", ticket,
+            " | Direction: ", tradeType);
+      break;  // Only one position expected at a time
+   }
+}
+
+//+------------------------------------------------------------------+
+//| RECALCULATE DAILY STATS ON RESTART                               |
+//| AUDIT-C5: Prevent g_TradesToday/g_DailyPnL resetting to zero    |
+//|           when EA restarts mid-day.                              |
+//+------------------------------------------------------------------+
+void RecalcDailyStats() {
+   datetime dayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   datetime dayEnd   = dayStart + 86400;  // +24h
+
+   if(!HistorySelect(dayStart, dayEnd)) {
+      Print("[AUDIT-C5] RecalcDailyStats: HistorySelect failed");
+      return;
+   }
+
+   int    tradesCount = 0;
+   double totalPnL    = 0;
+   int    totalDeals  = HistoryDealsTotal();
+
+   for(int i = 0; i < totalDeals; i++) {
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket == 0) continue;
+
+      long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+      if(dealMagic != Magic_Number) continue;
+
+      string dealSym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+      if(dealSym != _Symbol) continue;
+
+      ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+
+      if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_INOUT) {
+         // Count as a completed trade
+         tradesCount++;
+         totalPnL += HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+         totalPnL += HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+         totalPnL += HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+      }
+   }
+
+   g_TradesToday = tradesCount;
+   g_DailyPnL    = totalPnL;
+
+   Print("[AUDIT-C5] Daily stats restored: trades=", tradesCount,
+         " PnL=", DoubleToString(totalPnL, 2));
+
+   // AUDIT-C5: Sync Quality Filters daily counters if the method is available
+   // (CQualityFilters does not expose SetDailyStats — counters are managed internally
+   //  via RecordTradeOpen/Close. Calling ResetDaily + re-recording would risk
+   //  mismatching filter state, so we only sync the global counters above.)
+}
+
 //+------------------------------------------------------------------+
