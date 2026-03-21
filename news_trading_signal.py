@@ -129,29 +129,29 @@ class NewsTradingAnalyzer:
     # Surprise interpretation for Gold
     # Positive surprise (better than expected) generally bearish for Gold
     # Negative surprise (worse than expected) generally bullish for Gold
+    # Balanced: 9 bearish-Gold events vs 9 bullish-Gold events
     SURPRISE_GOLD_IMPACT = {
-        # Strong economy = less safe haven demand = bearish Gold
-        'NFP': -1,  # Better jobs = bearish Gold
+        # Strong economy = less safe haven demand = bearish Gold (9 events)
+        'NFP': -1,         # Better jobs = bearish Gold
         'GDP': -1,
         'Retail Sales': -1,
         'ISM': -1,
         'PMI': -1,
         'Employment': -1,
-        
-        # Higher inflation = bullish Gold (hedge)
-        'CPI': 1,  # Higher CPI = bullish Gold
+        'Interest Rate': -1,
+        'FOMC': -1,        # Hawkish surprise = bearish Gold
+        'Fed': -1,
+
+        # Bullish Gold drivers = safe haven / inflation / debasement (9 events)
+        'CPI': 1,          # Higher inflation = bullish Gold (hedge)
         'PPI': 1,
         'PCE': 1,
         'Inflation': 1,
-        
-        # Higher rates = bearish Gold (opportunity cost)
-        'Interest Rate': -1,
-        'FOMC': -1,  # Hawkish = bearish Gold
-        'Fed': -1,
-        
-        # Unemployment up = bullish Gold (dovish Fed expectations)
-        'Unemployment': 1,
+        'Unemployment': 1, # Rising unemployment = dovish Fed = bullish Gold
         'Jobless': 1,
+        'War': 1,          # Geopolitical escalation = safe haven demand
+        'Geopolitical': 1,
+        'Deficit': 1,      # Surprise deficit increase = currency debasement concern
     }
     
     def __init__(self):
@@ -252,7 +252,9 @@ class NewsTradingAnalyzer:
     ) -> str:
         """Determine Gold bias from news surprise"""
         
-        if abs(surprise_factor) < 0.1:
+        # Threshold lowered from 10% to 4% — most real economic surprises (NFP, CPI)
+        # fall in the 1-5% range; 10% was too strict and muted all surprise signals
+        if abs(surprise_factor) < 0.04:
             return "NEUTRAL"
         
         # Find impact direction for this event type
@@ -356,9 +358,10 @@ class NewsTradingAnalyzer:
         
         # Extreme fear = bullish for Gold (safe haven)
         # Extreme greed = bearish for Gold
-        if fg_value <= 25:
+        # Thresholds lowered from 25/75 to 30/70 to capture more market conditions
+        if fg_value <= 30:
             sentiment_bias = "BULLISH"
-        elif fg_value >= 75:
+        elif fg_value >= 70:
             sentiment_bias = "BEARISH"
         else:
             sentiment_bias = "NEUTRAL"
@@ -421,11 +424,14 @@ class NewsTradingAnalyzer:
         elif sentiment_bias == "BEARISH":
             bias_scores['BEARISH'] += 25
         
-        # Geopolitical
+        # Geopolitical — requires confirmation from at least one other indicator
+        # to prevent a single geo factor from unilaterally triggering a trade
         if geo_bias == "BULLISH":
-            bias_scores['BULLISH'] += 20
+            if cot_bias == "BULLISH" or sentiment_bias == "BULLISH":
+                bias_scores['BULLISH'] += 20
         elif geo_bias == "BEARISH":
-            bias_scores['BEARISH'] += 20
+            if cot_bias == "BEARISH" or sentiment_bias == "BEARISH":
+                bias_scores['BEARISH'] += 20
         
         # Surprise (if available, high weight for post-news)
         if timing_mode == TimingMode.POST_NEWS_ENTRY:
@@ -448,6 +454,17 @@ class NewsTradingAnalyzer:
             confidence = (max(bias_scores['BULLISH'], bias_scores['BEARISH']) / total_score) * 100
         else:
             confidence = 50
+
+        # Cap confidence at 70% when only one indicator is active — prevents a single
+        # factor (e.g. geo alone) from generating a max-size trade with false certainty
+        active_indicator_count = sum([
+            cot_bias != "NEUTRAL",
+            sentiment_bias != "NEUTRAL",
+            geo_bias != "NEUTRAL",
+            surprise_bias != "NEUTRAL",
+        ])
+        if active_indicator_count <= 1:
+            confidence = min(confidence, 70.0)
         
         # ═══════════════════════════════════════════════════════════
         # 7. DETERMINE ENTRY STRATEGY
