@@ -648,10 +648,10 @@ def health_v1():
     status = cache.status()
     all_fresh = all(v["fresh"] for v in status.values())
     return jsonify({
-        "status":      "healthy" if all_fresh else "degraded",
-        "warmup_done": _warmup_done.is_set(),
+        "status":       "healthy" if all_fresh else "degraded",
+        "warmup_done":  _warmup_done.is_set(),
         "signal_age_s": cache.age_seconds("signal"),
-        "timestamp":   datetime.utcnow().isoformat() + "Z",
+        "timestamp":    datetime.utcnow().isoformat() + "Z",
     }), 200
 
 
