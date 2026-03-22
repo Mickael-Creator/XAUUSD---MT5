@@ -520,9 +520,28 @@ bool ParseSignalJSON(string json) {
    parser.GetBool("wider_stops", widerStops);
    g_Signal.wider_stops = widerStops;
 
-   // blackout_minutes
+   // blackout_minutes — parsed manually to stay silent when field is null or absent.
+   // The API sends 0 (integer) in CLEAR mode and the actual minute count in BLACKOUT
+   // mode. Using GetInt would trigger a JsonParser WARNING on null, so we read the
+   // raw JSON directly: find the key, skip whitespace, reject "null", parse the int.
    int blackoutMin = 0;
-   parser.GetInt("blackout_minutes", blackoutMin);
+   {
+      int bkIdx = StringFind(json, "\"blackout_minutes\"");
+      if(bkIdx >= 0)
+      {
+         int colonIdx = StringFind(json, ":", bkIdx);
+         if(colonIdx >= 0)
+         {
+            int vStart = colonIdx + 1;
+            while(vStart < StringLen(json) &&
+                  StringGetCharacter(json, vStart) == ' ') vStart++;
+            // Only parse when the value is a digit (not "null" or missing)
+            ushort firstChar = StringGetCharacter(json, vStart);
+            if(firstChar >= '0' && firstChar <= '9')
+               blackoutMin = (int)StringToInteger(StringSubstr(json, vStart, 10));
+         }
+      }
+   }
    if(blackoutMin < 0) blackoutMin = 0;
    g_Signal.blackout_minutes = blackoutMin;
 
