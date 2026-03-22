@@ -80,7 +80,7 @@ CONFIG = {
         "signal":      {
             "can_trade": False, "direction": "NONE", "bias": "NEUTRAL",
             "confidence": 0, "size_factor": 1.0, "wider_stops": False,
-            "tp_mode": "NORMAL", "blackout_minutes": None, "timing_mode": "CLEAR",
+            "tp_mode": "NORMAL", "blackout_minutes": 0, "timing_mode": "CLEAR",
             "gold_price": 2920.0, "source": "fallback", "error": None
         }
     },
@@ -459,7 +459,7 @@ def _calculate_signal(macro: dict, cot: dict, news: dict,
             "size_factor":      signal.position_size_factor,
             "wider_stops":      signal.wider_stops,
             "tp_mode":          signal.take_profit_mode,
-            "blackout_minutes": round(signal.minutes_to_news, 0) if signal.blackout_active else None,
+            "blackout_minutes": int(round(signal.minutes_to_news, 0)) if signal.blackout_active else 0,
             "timing_mode":      signal.timing_mode.value,
             "gold_price":       gold_price.get("price"),
             "gold_source":      gold_price.get("source"),
