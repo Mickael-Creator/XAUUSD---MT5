@@ -14,6 +14,8 @@ Architecture :
 import os
 import json
 import time
+import hmac
+import hashlib
 import logging
 import sqlite3
 import threading
@@ -178,6 +180,67 @@ class InstitutionalCache:
 cache = InstitutionalCache()
 app = Flask(__name__)
 news_analyzer = NewsTradingAnalyzer()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SÉCURITÉ — BEARER TOKEN + HMAC-SHA256
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Credentials chargés depuis les variables d'environnement — jamais hardcodés
+_API_TOKEN   = os.environ.get('API_TOKEN', '')
+_HMAC_SECRET = os.environ.get('HMAC_SECRET', '').encode('utf-8')
+
+if not _API_TOKEN:
+    logger.warning("⚠️  API_TOKEN not set — authenticated routes will reject all requests")
+if not _HMAC_SECRET:
+    logger.warning("⚠️  HMAC_SECRET not set — response signatures will be empty strings")
+
+
+def _require_auth(f):
+    """
+    Décorateur Flask : vérifie l'en-tête Authorization: Bearer <API_TOKEN>.
+    Retourne HTTP 401 si le token est absent ou invalide.
+    Utilise hmac.compare_digest pour éviter les timing attacks.
+    """
+    from functools import wraps
+    from flask import request
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            logger.warning(
+                f"UNAUTHORIZED: missing Bearer token | "
+                f"IP={request.remote_addr} | PATH={request.path}"
+            )
+            return jsonify({"error": "Unauthorized", "detail": "Missing Bearer token"}), 401
+
+        provided = auth_header[len('Bearer '):]
+        if not _API_TOKEN or not hmac.compare_digest(provided, _API_TOKEN):
+            logger.warning(
+                f"UNAUTHORIZED: invalid token | "
+                f"IP={request.remote_addr} | PATH={request.path}"
+            )
+            return jsonify({"error": "Unauthorized", "detail": "Invalid token"}), 401
+
+        return f(*args, **kwargs)
+    return decorated
+
+
+def _sign_response(payload: dict) -> dict:
+    """
+    Ajoute une signature HMAC-SHA256 au payload JSON.
+    La signature couvre la sérialisation JSON triée (hors champ 'signature').
+    Retourne le payload avec le champ 'signature' ajouté.
+    """
+    if not _HMAC_SECRET:
+        payload['signature'] = ''
+        return payload
+    body_bytes = json.dumps(
+        payload, sort_keys=True, separators=(',', ':')
+    ).encode('utf-8')
+    payload['signature'] = hmac.new(_HMAC_SECRET, body_bytes, hashlib.sha256).hexdigest()
+    return payload
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -553,14 +616,43 @@ def init_db():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/news_trading_signal/quick', methods=['GET'])
+@_require_auth
 def news_trading_signal_quick():
     """
-    Route principale pour l'EA MT5.
+    Route principale pour l'EA MT5 (legacy path).
     Lecture pure du cache — réponse garantie < 5ms.
-    Retourne TOUJOURS HTTP 200.
+    Protégée par Bearer token. Réponse signée HMAC-SHA256.
     """
-    signal = cache.get_best("signal")
+    signal = _sign_response(dict(cache.get_best("signal")))
     return jsonify(signal), 200
+
+
+@app.route('/v1/news_trading_signal/quick', methods=['GET'])
+@_require_auth
+def news_trading_signal_quick_v1():
+    """
+    Route versionnée v1 — identique à /news_trading_signal/quick.
+    Permet la migration progressive des EAs vers les endpoints versionnés.
+    Protégée par Bearer token. Réponse signée HMAC-SHA256.
+    """
+    signal = _sign_response(dict(cache.get_best("signal")))
+    return jsonify(signal), 200
+
+
+@app.route('/v1/health', methods=['GET'])
+def health_v1():
+    """
+    Health check versionné — non authentifié, pour les monitors externes.
+    Retourne l'état du cache et le statut global du service.
+    """
+    status = cache.status()
+    all_fresh = all(v["fresh"] for v in status.values())
+    return jsonify({
+        "status":       "healthy" if all_fresh else "degraded",
+        "warmup_done":  _warmup_done.is_set(),
+        "signal_age_s": cache.age_seconds("signal"),
+        "timestamp":    datetime.utcnow().isoformat() + "Z",
+    }), 200
 
 
 @app.route('/news_trading_signal', methods=['GET'])
