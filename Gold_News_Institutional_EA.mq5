@@ -596,7 +596,11 @@ void CheckEntry() {
    // STEP 5: QUALITY FILTERS
    //================================================================
    if(g_filters != NULL) {
-      double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      // Use ASK for BUY entries, BID for SELL entries — filters must evaluate
+      // against the actual entry price, not always BID (avoids spread-induced asymmetry)
+      double price = (direction == "BUY")
+                     ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
       FilterResult fr = g_filters.CheckAllFilters(direction, price);
       if(!fr.passed) {
          // Log silencieux sauf premiÃ¨re fois
