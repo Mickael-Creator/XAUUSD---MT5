@@ -72,7 +72,7 @@ CONFIG = {
         "dxy":         {"dxy_index": 96.1},
         "vix":         {"vix_level": 15.4},
         "macro":       {"us10y": 4.21, "real_rate": 1.8, "dxy": 96.1, "vix": 15.4, "cot": {}},
-        "cot":         {"percentile": 81.1, "regime": "VERY_BULLISH", "net_positions": 182877},
+        "cot":         {"percentile": 50.0, "regime": "NEUTRAL", "net_positions": 0},
         "news":        {"events": [], "next_high_impact": None, "time_until_hours": None, "in_blackout": False},
         "sentiment":   {"fear_greed_index": 50, "fear_greed_label": "Neutral"},
         "geopolitics": {"tension_level": 5, "hot_zones_active": ["Ukraine", "Russia", "Gaza", "China"],
@@ -442,7 +442,8 @@ def _calculate_signal(macro: dict, cot: dict, news: dict,
             news_data=news_data,
             cot_data=cot,
             sentiment_data={"fear_greed": sentiment},
-            geopolitical_data=geo
+            geopolitical_data=geo,
+            macro_data=macro,
         )
 
         can_trade = (
