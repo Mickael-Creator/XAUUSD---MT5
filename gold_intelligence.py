@@ -265,12 +265,12 @@ def _fetch_gold_price() -> dict:
         )
         if r.status_code == 200:
             price = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            if 2000 < price < 4000:
+            if 1500 < price < 6000:
                 return {"price": round(price, 2), "source": "yahoo_v8_gcf"}
     except Exception as e:
         logger.warning(f"Gold price source 1 (Yahoo GC=F) failed: {e}")
 
-    # Source 2 : GLD ETF proxy
+    # Source 2 : GLD ETF proxy (GLD ≈ 1/10 troy oz)
     try:
         r = requests.get(
             "https://query1.finance.yahoo.com/v8/finance/chart/GLD?interval=1m&range=1d",
@@ -278,13 +278,13 @@ def _fetch_gold_price() -> dict:
         )
         if r.status_code == 200:
             gld = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            price = round(gld * 9.45, 2)
-            if 2000 < price < 4000:
+            price = round(gld * 10.0, 2)
+            if 1500 < price < 6000:
                 return {"price": price, "source": "gld_proxy"}
     except Exception as e:
         logger.warning(f"Gold price source 2 (GLD proxy) failed: {e}")
 
-    # Source 3 : IAU ETF proxy
+    # Source 3 : IAU ETF proxy (IAU ≈ 1/100 troy oz)
     try:
         r = requests.get(
             "https://query1.finance.yahoo.com/v8/finance/chart/IAU?interval=1m&range=1d",
@@ -292,8 +292,8 @@ def _fetch_gold_price() -> dict:
         )
         if r.status_code == 200:
             iau = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            price = round(iau * 18.9, 2)
-            if 2000 < price < 4000:
+            price = round(iau * 100.0, 2)
+            if 1500 < price < 6000:
                 return {"price": price, "source": "iau_proxy"}
     except Exception as e:
         logger.warning(f"Gold price source 3 (IAU proxy) failed: {e}")
