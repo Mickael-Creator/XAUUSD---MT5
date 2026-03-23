@@ -422,6 +422,67 @@ def vix():
 
 
 # ============================================================
+# INTERNAL ENDPOINTS — called by gold_intelligence.py (localhost only)
+# No auth required: these are never exposed through nginx
+# ============================================================
+
+@app.route('/dxy_data', methods=['GET'])
+def dxy_data():
+    """Internal endpoint for gold_intelligence.py — returns dxy_index key."""
+    dxy_value = 103.5  # fallback
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            cursor = conn.cursor()
+            cursor.execute("SELECT dxy_close FROM market_data ORDER BY datetime DESC LIMIT 1")
+            result = cursor.fetchone()
+            if result and result[0]:
+                dxy_value = float(result[0])
+            conn.close()
+        except Exception as e:
+            logging.debug(f"DXY internal fetch failed: {e}")
+    return jsonify({"dxy_index": round(dxy_value, 2)})
+
+
+@app.route('/vix_data', methods=['GET'])
+def vix_data():
+    """Internal endpoint for gold_intelligence.py — returns vix_level key."""
+    vix_value = 18.0  # fallback
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            cursor = conn.cursor()
+            cursor.execute("SELECT vix_level FROM market_data ORDER BY datetime DESC LIMIT 1")
+            result = cursor.fetchone()
+            if result and result[0]:
+                vix_value = float(result[0])
+            conn.close()
+        except Exception as e:
+            logging.debug(f"VIX internal fetch failed: {e}")
+    return jsonify({"vix_level": round(vix_value, 2)})
+
+
+@app.route('/macro_data', methods=['GET'])
+def macro_data():
+    """Internal endpoint for gold_intelligence.py — returns us10y and real_rate."""
+    us10y = 4.101  # fallback
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            cursor = conn.cursor()
+            cursor.execute("SELECT us10y FROM macro_data ORDER BY timestamp DESC LIMIT 1")
+            result = cursor.fetchone()
+            if result and result[0]:
+                us10y = float(result[0])
+            conn.close()
+        except Exception as e:
+            logging.debug(f"Macro internal fetch failed: {e}")
+    inflation_target = 2.45
+    real_rate = round(us10y - inflation_target, 3)
+    return jsonify({"us10y": round(us10y, 3), "real_rate": real_rate})
+
+
+# ============================================================
 # MARKET CONTEXT ENDPOINT
 # ============================================================
 @app.route('/v1/api/market_context', methods=['GET'])
