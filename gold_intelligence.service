@@ -1,0 +1,41 @@
+[Unit]
+Description=Gold ML Intelligence System v2.0 — Signal Engine
+Documentation=https://github.com/Mickael-Creator/XAUUSD---MT5
+After=network.target goldml-api.service
+Wants=network-online.target
+
+[Service]
+# Run as dedicated non-root user
+User=goldml
+Group=goldml
+
+# Working directory
+WorkingDirectory=/root/gold_ml_phase4
+
+# Load API_TOKEN and HMAC_SECRET from secure env file
+EnvironmentFile=/etc/goldml/.env
+
+# Start command — port 5002
+ExecStart=/usr/bin/python3 /root/gold_ml_phase4/gold_intelligence.py
+
+# Restart policy — always restart on failure or clean exit
+Restart=always
+RestartSec=5
+
+# Output to journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=goldml-intelligence
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/gold_ml_phase4 /var/log
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

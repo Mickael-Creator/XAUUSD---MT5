@@ -403,7 +403,29 @@ class NewsTradingAnalyzer:
         reasoning.append(f"VIX: {vix_bias} ({vix:.1f})")
 
         # ═══════════════════════════════════════════════════════════
-        # 6. ANALYZE GEOPOLITICAL RISK  [weight: 15 pts]
+        # 6. ANALYZE US10Y / REAL RATE  [weight: 15 pts]
+        #    Negative real yield → Gold attractive (no opportunity cost)
+        #    High positive real yield → Gold unattractive
+        # ═══════════════════════════════════════════════════════════
+
+        # Use real_rate (us10y − inflation_target) if available,
+        # fall back to nominal us10y with a rough 2.5% inflation assumption
+        real_rate = macro_data.get('real_rate')
+        if real_rate is None:
+            us10y = macro_data.get('us10y', 4.0)
+            real_rate = us10y - 2.5  # rough inflation proxy
+
+        if real_rate < 0:
+            us10y_bias = "BULLISH"   # Negative real yield → Gold becomes attractive
+        elif real_rate > 2.0:
+            us10y_bias = "BEARISH"   # High real yield → opportunity cost too high
+        else:
+            us10y_bias = "NEUTRAL"   # 0–2.0%: transition zone
+
+        reasoning.append(f"RealRate: {us10y_bias} ({real_rate:.2f}%)")
+
+        # ═══════════════════════════════════════════════════════════
+        # 7. ANALYZE GEOPOLITICAL RISK  [weight: 15 pts]
         # ═══════════════════════════════════════════════════════════
 
         geo_tension = geopolitical_data.get('tension_level', 5)
@@ -421,7 +443,7 @@ class NewsTradingAnalyzer:
             reasoning.append(f"Geopolitical: NEUTRAL (tension {geo_tension}/10)")
 
         # ═══════════════════════════════════════════════════════════
-        # 7. ANALYZE SURPRISE (if post-news)  [weight: 25 pts]
+        # 8. ANALYZE SURPRISE (if post-news)  [weight: 25 pts]
         # ═══════════════════════════════════════════════════════════
 
         surprise_bias = "NEUTRAL"
@@ -436,19 +458,19 @@ class NewsTradingAnalyzer:
                 reasoning.append(f"Surprise: {surprise_bias} ({event}: {actual} vs {forecast}, {surprise_pct:+.1f}%)")
 
         # ═══════════════════════════════════════════════════════════
-        # 8. COMBINE BIASES → ENTRY DECISION
+        # 9. COMBINE BIASES → ENTRY DECISION
         #
-        # Weights (total possible without surprise = 110 pts):
+        # Weights (total possible without surprise = 120 pts):
         #   COT          30 pts  (institutional positioning, J-3 lag)
-        #   DXY          25 pts  (real-time inverse correlation)
+        #   DXY          20 pts  (real-time inverse correlation)
         #   Fear & Greed 20 pts  (contrarian sentiment)
         #   VIX          20 pts  (risk-off proxy)
+        #   US10Y/Real   15 pts  (opportunity cost for holding Gold)
         #   Geopolitical 15 pts  (requires confirmation from ≥1 other)
         #   Surprise     25 pts  (POST_NEWS mode only)
         # ═══════════════════════════════════════════════════════════
 
         bias_scores = {'BULLISH': 0, 'BEARISH': 0}
-        aligned_indicators = []  # Track which indicators are aligned with winning bias
 
         # COT — 30 pts
         if cot_bias == "BULLISH":
@@ -456,11 +478,11 @@ class NewsTradingAnalyzer:
         elif cot_bias == "BEARISH":
             bias_scores['BEARISH'] += 30
 
-        # DXY — 25 pts
+        # DXY — 20 pts (reduced from 25: US10Y now covers part of the USD signal)
         if dxy_bias == "BULLISH":
-            bias_scores['BULLISH'] += 25
+            bias_scores['BULLISH'] += 20
         elif dxy_bias == "BEARISH":
-            bias_scores['BEARISH'] += 25
+            bias_scores['BEARISH'] += 20
 
         # Fear & Greed — 20 pts
         if sentiment_bias == "BULLISH":
@@ -474,10 +496,16 @@ class NewsTradingAnalyzer:
         elif vix_bias == "BEARISH":
             bias_scores['BEARISH'] += 20
 
+        # US10Y / Real Rate — 15 pts
+        if us10y_bias == "BULLISH":
+            bias_scores['BULLISH'] += 15
+        elif us10y_bias == "BEARISH":
+            bias_scores['BEARISH'] += 15
+
         # Geopolitical — 15 pts, requires confirmation from ≥1 other indicator
         # to prevent a single geo event from unilaterally overriding all others
-        other_bullish = any(b == "BULLISH" for b in [cot_bias, dxy_bias, sentiment_bias, vix_bias])
-        other_bearish = any(b == "BEARISH" for b in [cot_bias, dxy_bias, sentiment_bias, vix_bias])
+        other_bullish = any(b == "BULLISH" for b in [cot_bias, dxy_bias, sentiment_bias, vix_bias, us10y_bias])
+        other_bearish = any(b == "BEARISH" for b in [cot_bias, dxy_bias, sentiment_bias, vix_bias, us10y_bias])
         if geo_bias == "BULLISH" and other_bullish:
             bias_scores['BULLISH'] += 15
         elif geo_bias == "BEARISH" and other_bearish:
@@ -500,7 +528,7 @@ class NewsTradingAnalyzer:
 
         # ── Count aligned indicators ────────────────────────────────
         # An indicator is "aligned" when it agrees with the winning direction.
-        # Surprise only counts when POST_NEWS mode is active.
+        # 6 base indicators; surprise only counts in POST_NEWS mode.
         winning_bias = entry_bias if entry_bias != "NEUTRAL" else (
             "BULLISH" if bias_scores['BULLISH'] >= bias_scores['BEARISH'] else "BEARISH"
         )
@@ -509,18 +537,21 @@ class NewsTradingAnalyzer:
             dxy_bias == winning_bias,
             sentiment_bias == winning_bias,
             vix_bias == winning_bias,
+            us10y_bias == winning_bias,
             geo_bias == winning_bias,
             timing_mode == TimingMode.POST_NEWS_ENTRY and surprise_bias == winning_bias,
         ])
 
         # ── Confidence — tiered by number of aligned indicators ─────
-        #   1 aligned  → max 50%
-        #   2 aligned  → max 65%
-        #   3 aligned  → max 78%
-        #   4 aligned  → max 90%
-        #   5+ aligned → max 98% (near-perfect consensus)
-        confidence_caps = {1: 50.0, 2: 65.0, 3: 78.0, 4: 90.0}
-        max_confidence = confidence_caps.get(aligned_count, 98.0 if aligned_count >= 5 else 50.0)
+        #   6 base indicators (+ 1 surprise in POST_NEWS = 7 max)
+        #   1 aligned  → max 45%
+        #   2 aligned  → max 60%
+        #   3 aligned  → max 73%
+        #   4 aligned  → max 83%
+        #   5 aligned  → max 92%
+        #   6+ aligned → max 98% (near-perfect consensus)
+        confidence_caps = {1: 45.0, 2: 60.0, 3: 73.0, 4: 83.0, 5: 92.0}
+        max_confidence = confidence_caps.get(aligned_count, 98.0 if aligned_count >= 6 else 45.0)
 
         total_score = bias_scores['BULLISH'] + bias_scores['BEARISH']
         if total_score > 0:
@@ -536,7 +567,7 @@ class NewsTradingAnalyzer:
         )
         
         # ═══════════════════════════════════════════════════════════
-        # 9. DETERMINE ENTRY STRATEGY
+        # 10. DETERMINE ENTRY STRATEGY
         # ═══════════════════════════════════════════════════════════
         
         blackout_active = timing_mode == TimingMode.BLACKOUT
@@ -587,7 +618,7 @@ class NewsTradingAnalyzer:
         position_size_factor = min(1.5, max(0, position_size_factor))
         
         # ═══════════════════════════════════════════════════════════
-        # 10. RISK PARAMETERS
+        # 11. RISK PARAMETERS
         # ═══════════════════════════════════════════════════════════
         
         # Wider stops if high impact news nearby
