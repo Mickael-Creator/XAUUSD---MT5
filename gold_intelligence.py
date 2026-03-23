@@ -165,15 +165,19 @@ class InstitutionalCache:
     def status(self) -> dict:
         """Retourne l'état de fraîcheur de toutes les clés — pour monitoring"""
         with self._lock:
-            return {
-                key: {
-                    "age_s":   self.age_seconds(key),
-                    "ttl_s":   CONFIG["ttl"].get(key, 300),
-                    "fresh":   self.is_fresh(key),
+            now = time.time()
+            result = {}
+            for key in CONFIG["ttl"]:
+                ts = self._timestamps.get(key, 0)
+                ttl = CONFIG["ttl"].get(key, 300)
+                age = 999999 if ts == 0 else int(now - ts)
+                result[key] = {
+                    "age_s":    age,
+                    "ttl_s":    ttl,
+                    "fresh":    (now - ts) < ttl,
                     "has_data": key in self._data and bool(self._data[key])
                 }
-                for key in CONFIG["ttl"]
-            }
+            return result
 
 
 # Instances globales
@@ -265,7 +269,7 @@ def _fetch_gold_price() -> dict:
         )
         if r.status_code == 200:
             price = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            if 2000 < price < 4000:
+            if 1500 < price < 6000:
                 return {"price": round(price, 2), "source": "yahoo_v8_gcf"}
     except Exception as e:
         logger.warning(f"Gold price source 1 (Yahoo GC=F) failed: {e}")
@@ -279,7 +283,7 @@ def _fetch_gold_price() -> dict:
         if r.status_code == 200:
             gld = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
             price = round(gld * 9.45, 2)
-            if 2000 < price < 4000:
+            if 1500 < price < 6000:
                 return {"price": price, "source": "gld_proxy"}
     except Exception as e:
         logger.warning(f"Gold price source 2 (GLD proxy) failed: {e}")
@@ -293,7 +297,7 @@ def _fetch_gold_price() -> dict:
         if r.status_code == 200:
             iau = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
             price = round(iau * 18.9, 2)
-            if 2000 < price < 4000:
+            if 1500 < price < 6000:
                 return {"price": price, "source": "iau_proxy"}
     except Exception as e:
         logger.warning(f"Gold price source 3 (IAU proxy) failed: {e}")
