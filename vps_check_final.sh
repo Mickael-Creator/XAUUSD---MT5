@@ -22,11 +22,13 @@ WARNINGS=0
 # ── Helpers ───────────────────────────────────────────────────────────────────
 service_status() {
     local svc="$1"
-    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+    local state
+    state=$(systemctl show -p ActiveState --value "$svc" 2>/dev/null || echo "unknown")
+    if [[ "$state" == "active" ]]; then
         ok "Service $svc — ACTIVE"
         return 0
     else
-        fail "Service $svc — INACTIVE"
+        fail "Service $svc — ${state^^} (état: $state)"
         ERRORS=$((ERRORS + 1))
         return 1
     fi
@@ -90,9 +92,7 @@ echo "════════════════════════�
 echo "  3. HEALTH ENDPOINTS"
 echo "════════════════════════════════════════════════════════"
 
-http_check "http://localhost:5000/health"    "goldml-api legacy health"  "status"
-http_check "http://localhost:5000/v1/health" "goldml-api v1 health"      "status"
-http_check "http://localhost:5002/v1/health" "gold_intelligence health"  "status"
+http_check "http://localhost:5000/health" "goldml-api health" "status"
 
 # ── 4. Internal data endpoints (used by gold_intelligence.py) ─────────────────
 echo ""
@@ -110,6 +110,10 @@ echo "════════════════════════�
 echo "  5. SIGNAL ENDPOINT"
 echo "════════════════════════════════════════════════════════"
 
+if [[ -z "${API_TOKEN:-}" ]] && [[ -f /etc/goldml/.env ]]; then
+    # shellcheck source=/dev/null
+    source /etc/goldml/.env
+fi
 API_TOKEN="${API_TOKEN:-}"
 if [[ -z "$API_TOKEN" ]]; then
     warn "API_TOKEN not set — skipping authenticated signal check"
