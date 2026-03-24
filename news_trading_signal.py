@@ -378,12 +378,12 @@ class NewsTradingAnalyzer:
 
         dxy = macro_data.get('dxy', 101.5)  # Neutral mid-range default
 
-        if dxy > 103:
+        if dxy > 104:
             dxy_bias = "BEARISH"   # Strong dollar → pressure on Gold
-        elif dxy < 100:
+        elif dxy < 101:
             dxy_bias = "BULLISH"   # Weak dollar → supports Gold
         else:
-            dxy_bias = "NEUTRAL"   # 100–103: transition zone
+            dxy_bias = "NEUTRAL"   # 101–104: transition zone
 
         reasoning.append(f"DXY: {dxy_bias} ({dxy:.1f})")
 
@@ -588,7 +588,7 @@ class NewsTradingAnalyzer:
             position_size_factor = 0.75  # Reduced size for reversal
         elif timing_mode == TimingMode.PRE_NEWS_SETUP:
             # Pre-news: Trend continuation if aligned
-            if confidence >= 70 and entry_bias != "NEUTRAL":
+            if confidence >= 60 and entry_bias != "NEUTRAL":
                 entry_strategy = EntryStrategy.TREND_CONTINUATION
                 suggested_direction = "BUY" if entry_bias == "BULLISH" else "SELL"
                 position_size_factor = 0.5  # Small size before news
