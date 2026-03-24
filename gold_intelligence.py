@@ -68,7 +68,7 @@ CONFIG = {
 
     # Valeurs de fallback institutionnelles (dernières valeurs connues fiables)
     "fallback": {
-        "gold_price":  {"price": 2920.0,  "source": "fallback"},
+        "gold_price":  {"price": 4390.0,  "source": "fallback"},
         "dxy":         {"dxy_index": 96.1},
         "vix":         {"vix_level": 15.4},
         "macro":       {"us10y": 4.21, "real_rate": 1.8, "dxy": 96.1, "vix": 15.4, "cot": {}},
@@ -81,7 +81,7 @@ CONFIG = {
             "can_trade": False, "direction": "NONE", "bias": "NEUTRAL",
             "confidence": 0, "size_factor": 1.0, "wider_stops": False,
             "tp_mode": "NORMAL", "blackout_minutes": 0, "timing_mode": "CLEAR",
-            "gold_price": 2920.0, "source": "fallback", "error": None
+            "gold_price": 4390.0, "source": "fallback", "error": None
         }
     },
 
@@ -255,9 +255,10 @@ def _fetch_gold_price() -> dict:
     """
     Fallback chain prix gold :
     1. Yahoo Finance API v8 (GC=F) — directe, sans lib yfinance
-    2. GLD ETF proxy (×9.45)
-    3. IAU ETF proxy (×18.9)
-    4. Retourne le dernier cache stale
+    2. Yahoo Finance API v8 (XAUUSD=X) — forex pair
+    3. GLD ETF proxy (×10.85 — ~1/10 oz gold, ajusté frais)
+    4. IAU ETF proxy (×53.0 — ratio courant post-splits)
+    5. Retourne le dernier cache stale
     """
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
@@ -269,12 +270,25 @@ def _fetch_gold_price() -> dict:
         )
         if r.status_code == 200:
             price = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            if 1500 < price < 6000:
+            if 1500 < price < 8000:
                 return {"price": round(price, 2), "source": "yahoo_v8_gcf"}
     except Exception as e:
         logger.warning(f"Gold price source 1 (Yahoo GC=F) failed: {e}")
 
-    # Source 2 : GLD ETF proxy
+    # Source 2 : Yahoo v8 XAUUSD=X (forex pair)
+    try:
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD%3DX?interval=1m&range=1d",
+            headers=headers, timeout=8
+        )
+        if r.status_code == 200:
+            price = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
+            if 1500 < price < 8000:
+                return {"price": round(price, 2), "source": "yahoo_v8_xauusd"}
+    except Exception as e:
+        logger.warning(f"Gold price source 2 (Yahoo XAUUSD=X) failed: {e}")
+
+    # Source 3 : GLD ETF proxy (~1/10 oz gold)
     try:
         r = requests.get(
             "https://query1.finance.yahoo.com/v8/finance/chart/GLD?interval=1m&range=1d",
@@ -282,13 +296,13 @@ def _fetch_gold_price() -> dict:
         )
         if r.status_code == 200:
             gld = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            price = round(gld * 9.45, 2)
-            if 1500 < price < 6000:
+            price = round(gld * 10.85, 2)
+            if 1500 < price < 8000:
                 return {"price": price, "source": "gld_proxy"}
     except Exception as e:
-        logger.warning(f"Gold price source 2 (GLD proxy) failed: {e}")
+        logger.warning(f"Gold price source 3 (GLD proxy) failed: {e}")
 
-    # Source 3 : IAU ETF proxy
+    # Source 4 : IAU ETF proxy
     try:
         r = requests.get(
             "https://query1.finance.yahoo.com/v8/finance/chart/IAU?interval=1m&range=1d",
@@ -296,11 +310,11 @@ def _fetch_gold_price() -> dict:
         )
         if r.status_code == 200:
             iau = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            price = round(iau * 18.9, 2)
-            if 1500 < price < 6000:
+            price = round(iau * 53.0, 2)
+            if 1500 < price < 8000:
                 return {"price": price, "source": "iau_proxy"}
     except Exception as e:
-        logger.warning(f"Gold price source 3 (IAU proxy) failed: {e}")
+        logger.warning(f"Gold price source 4 (IAU proxy) failed: {e}")
 
     # Toutes les sources ont échoué → retourner le cache stale
     stale = cache.get_best("gold_price")
@@ -339,15 +353,29 @@ def _fetch_macro() -> dict:
 
 
 def _fetch_cot() -> dict:
-    """Fetch COT data — TTL 1h car données hebdomadaires"""
+    """Fetch COT data — TTL 1h car données hebdomadaires. Staleness check intégré."""
     try:
         r = requests.get(f"{CONFIG['local_api_base']}/cot_data", timeout=5)
         if r.status_code == 200:
             data = r.json()
+            # Staleness check: si report_date > 14 jours, data probablement stale
+            report_date = data.get("report_date", "")
+            if report_date:
+                try:
+                    rd = datetime.strptime(report_date[:10], "%Y-%m-%d")
+                    days_old = (datetime.utcnow() - rd).days
+                    if days_old > 14:
+                        logger.warning(
+                            f"⚠️ COT data is {days_old} days old (report_date={report_date}). "
+                            f"CFTC source may be stale — check manually!"
+                        )
+                except ValueError:
+                    pass
             return {
                 "percentile":     data.get("percentile_net") or data.get("cot_percentile") or data.get("percentile"),
                 "regime":         data.get("sentiment"),
-                "net_positions":  data.get("net_position")
+                "net_positions":  data.get("net_position"),
+                "report_date":    report_date,
             }
     except Exception as e:
         logger.warning(f"COT fetch failed (using cache): {e}")
@@ -477,7 +505,7 @@ def _calculate_signal(macro: dict, cot: dict, news: dict,
         # En cas d'erreur de calcul, retourner un signal neutre safe
         return {
             **CONFIG["fallback"]["signal"],
-            "gold_price": gold_price.get("price", 2920.0),
+            "gold_price": gold_price.get("price", 4390.0),
             "timestamp":  datetime.utcnow().isoformat() + "Z",
             "error":      str(e),
         }

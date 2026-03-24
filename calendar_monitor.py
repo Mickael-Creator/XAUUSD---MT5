@@ -870,43 +870,87 @@ _cot_cache = {'data': None, 'fetched_at': None}
 _COT_CACHE_SECONDS = 3600 * 6  # 6 hours
 
 def _fetch_cot_from_cftc():
-    """Fetch fresh COT data from CFTC Socrata Open Data API"""
+    """
+    Fetch fresh COT data from CFTC Socrata Open Data API.
+    Fallback chain: Legacy Futures Only → Disaggregated Futures → Legacy Combined.
+    Staleness detection: alerte si report_date > 14 jours.
+    """
+    import requests as req
+
+    # --- Source 1: Legacy Futures Only (jun7-fc8e) - primary ---
+    result = _try_cftc_dataset(req, "jun7-fc8e", "Legacy Futures Only",
+                                long_key='noncomm_positions_long_all',
+                                short_key='noncomm_positions_short_all')
+    if result:
+        return result
+
+    # --- Source 2: Disaggregated Futures (6dca-aqww) - Managed Money ---
+    result = _try_cftc_dataset(req, "6dca-aqww", "Disaggregated Futures",
+                                long_key='m_money_positions_long_all',
+                                short_key='m_money_positions_short_all')
+    if result:
+        return result
+
+    # --- Source 3: Legacy Combined (kh3c-gbw2) ---
+    result = _try_cftc_dataset(req, "kh3c-gbw2", "Legacy Combined",
+                                long_key='noncomm_positions_long_all',
+                                short_key='noncomm_positions_short_all')
+    if result:
+        return result
+
+    logger.error("[COT] All 3 CFTC datasets failed — no fresh COT data available")
+    return None
+
+
+def _try_cftc_dataset(req, dataset_id, dataset_name, long_key, short_key):
+    """Try fetching COT gold data from a specific CFTC Socrata dataset."""
     try:
-        import requests as req
-        url = "https://publicreporting.cftc.gov/resource/jun7-fc8e.json"
+        url = f"https://publicreporting.cftc.gov/resource/{dataset_id}.json"
         params = {
-            "$where": "commodity_name = 'GOLD' AND contract_market_name = 'GOLD'",
+            "$where": "commodity_name = 'GOLD'",
             "$order": "report_date_as_yyyy_mm_dd DESC",
             "$limit": 52
         }
         resp = req.get(url, params=params, timeout=30)
         if resp.status_code != 200:
-            logger.error(f"[COT] CFTC API returned {resp.status_code}")
+            logger.warning(f"[COT] {dataset_name} ({dataset_id}) returned HTTP {resp.status_code}")
             return None
         data = resp.json()
         if not data:
+            logger.warning(f"[COT] {dataset_name} ({dataset_id}) returned empty data")
             return None
 
         latest = data[0]
-        long_pos = int(float(latest.get('noncomm_positions_long_all', 0)))
-        short_pos = int(float(latest.get('noncomm_positions_short_all', 0)))
+        long_pos = int(float(latest.get(long_key, 0)))
+        short_pos = int(float(latest.get(short_key, 0)))
         net_position = long_pos - short_pos
         total_oi = int(float(latest.get('open_interest_all', 0)))
         report_date = latest.get('report_date_as_yyyy_mm_dd', '')[:10]
+
+        # Staleness detection
+        try:
+            rd = datetime.strptime(report_date, "%Y-%m-%d")
+            days_old = (datetime.now() - rd).days
+            if days_old > 14:
+                logger.warning(
+                    f"⚠️ [COT] {dataset_name} data is {days_old} days old "
+                    f"(report_date={report_date}) — trying next source"
+                )
+                return None  # Force fallback to next dataset
+        except ValueError:
+            pass
 
         # Net change vs previous week
         net_change = 0
         if len(data) > 1:
             prev = data[1]
-            prev_net = int(float(prev.get('noncomm_positions_long_all', 0))) - \
-                       int(float(prev.get('noncomm_positions_short_all', 0)))
+            prev_net = int(float(prev.get(long_key, 0))) - int(float(prev.get(short_key, 0)))
             net_change = net_position - prev_net
 
         # Percentile from 52-week history
         historical_nets = []
         for row in data:
-            net = int(float(row.get('noncomm_positions_long_all', 0))) - \
-                  int(float(row.get('noncomm_positions_short_all', 0)))
+            net = int(float(row.get(long_key, 0))) - int(float(row.get(short_key, 0)))
             historical_nets.append(net)
         below = sum(1 for h in historical_nets if h < net_position)
         percentile_net = round((below / len(historical_nets)) * 100, 1) if historical_nets else 50.0
@@ -929,6 +973,7 @@ def _fetch_cot_from_cftc():
         except Exception as db_err:
             logger.warning(f"[COT] DB save failed: {db_err}")
 
+        logger.info(f"[COT] {dataset_name} OK: date={report_date}, net={net_position:+,}, pct={percentile_net:.1f}%")
         return {
             'long_pos': long_pos,
             'short_pos': short_pos,
@@ -936,11 +981,12 @@ def _fetch_cot_from_cftc():
             'net_change': net_change,
             'total_oi': total_oi,
             'report_date': report_date,
-            'percentile_net': percentile_net
+            'percentile_net': percentile_net,
+            'source': f'CFTC_{dataset_name.replace(" ", "_").upper()}'
         }
 
     except Exception as e:
-        logger.error(f"[COT] CFTC fetch error: {e}")
+        logger.error(f"[COT] {dataset_name} ({dataset_id}) error: {e}")
         return None
 
 @app.route('/cot_data', methods=['GET'])
