@@ -3,14 +3,14 @@
 //|                 INSTITUTIONAL NEWS TRADING SYSTEM                |
 //|                                                                  |
 //|  LOGIC:                                                          |
-//|  1. API donne la DIRECTION (basÃ©e sur COT + Sentiment + GÃ©o)     |
+//|  1. API donne la DIRECTION (basee sur COT + Sentiment + Geo)     |
 //|  2. API donne le TIMING (BLACKOUT, PRE_NEWS, POST_NEWS, CLEAR)   |
 //|  3. API donne le SIZE_FACTOR (ajustement position)               |
-//|  4. Sniper SMC trouve le POINT D'ENTRÃ‰E prÃ©cis                   |
+//|  4. Sniper SMC trouve le POINT D'ENTREE precis                   |
 //|                                                                  |
-//|  STRATÃ‰GIE INSTITUTIONNELLE:                                     |
-//|  - BLACKOUT: Ne pas trader (30min avant/15min aprÃ¨s news)        |
-//|  - PRE_NEWS_SETUP: Position prudente (0.5x) si alignÃ©           |
+//|  STRATEGIE INSTITUTIONNELLE:                                     |
+//|  - BLACKOUT: Ne pas trader (30min avant/15min apres news)        |
+//|  - PRE_NEWS_SETUP: Position prudente (0.5x) si aligne           |
 //|  - POST_NEWS_ENTRY: FADE THE SPIKE - Entrer contre le retail    |
 //|  - CLEAR: Trading normal selon le biais                          |
 //+------------------------------------------------------------------+
@@ -28,38 +28,40 @@
 #include "GoldML_QualityFilters.mqh"
 // AUDIT-C1: Robust JSON parser replaces fragile StringFind approach
 #include "GoldML_JsonParser.mqh"
+#include "GoldML_DataBridge.mqh"
 
 CTrade trade;
 CPositionInfo posInfo;
 CSniperM15* g_sniper = NULL;
 CPositionManagerV2* g_posMgr = NULL;
 CQualityFilters* g_filters = NULL;
+CDataBridge*     g_bridge  = NULL;
 
 //+------------------------------------------------------------------+
 //| API CONFIGURATION                                                 |
 //+------------------------------------------------------------------+
-input group "â•â•â• API NEWS TRADING â•â•â•"
+input group "=== API NEWS TRADING ==="
 // AUDIT-VPS-C4: Default URL updated to versioned endpoint
 input string API_News_URL = "http://86.48.5.126:5002/v1/news_trading_signal/quick";
 input int    API_Timeout = 5000;
 input int    API_Refresh_Seconds = 30;
-// AUDIT-VPS-C1: Bearer token for API authentication — set in EA inputs, never hardcode
+// AUDIT-VPS-C1: Bearer token for API authentication -- set in EA inputs, never hardcode
 input string API_Auth_Token = "";  // Set to your API_TOKEN value
 
 //+------------------------------------------------------------------+
 //| TRADING RULES                                                     |
 //+------------------------------------------------------------------+
-input group "â•â•â• TRADING RULES â•â•â•"
+input group "=== TRADING RULES ==="
 input double Min_Confidence = 60.0;        // Minimum confidence pour trader
-input bool   Allow_PreNews_Trading = true; // Autoriser trades prÃ©-news (prudent)
+input bool   Allow_PreNews_Trading = true; // Autoriser trades pre-news (prudent)
 input bool   Allow_PostNews_Fade = true;   // Autoriser fade post-news
 
 //+------------------------------------------------------------------+
 //| SNIPER ENTRY SETTINGS (M15 Principal + M5 Confirmation)           |
 //+------------------------------------------------------------------+
-input group "â•â•â• SNIPER ENTRY (SMC M15) â•â•â•"
+input group "=== SNIPER ENTRY (SMC M15) ==="
 input int    Sniper_Swing_Lookback = 24;   // M15: 24 bars = 6 heures
-input int    Sniper_Min_Swing_Bars = 4;    // M15: Plus de stabilitÃ©
+input int    Sniper_Min_Swing_Bars = 4;    // M15: Plus de stabilite
 input double Sniper_Fib_Entry_Min = 0.50;
 input double Sniper_Fib_Entry_Max = 0.79;
 input double Sniper_Fib_Optimal = 0.618;
@@ -69,7 +71,7 @@ input bool   Sniper_Require_Sweep = true;
 input bool   Sniper_Require_BOS = true;
 input double Sniper_Min_RR = 2.0;
 input int    Sniper_Min_Score = 60;        // Post-news = accepte un peu moins
-input double Sniper_Max_Spread = 4.5;      // Ã‰largi pour volatilitÃ© news
+input double Sniper_Max_Spread = 4.5;      // Elargi pour volatilite news
 input double Sniper_SL_Buffer_Pips = 3.0;  // M15: Buffer plus large
 input double Sniper_SL_Min_Pips = 20.0;    // M15: SL minimum plus large
 input double Sniper_SL_Max_Pips = 60.0;    // M15: SL max pour news
@@ -78,7 +80,7 @@ input bool   Use_M5_Confirmation = true;   // Confirmation pattern M5
 //+------------------------------------------------------------------+
 //| POSITION MANAGEMENT                                               |
 //+------------------------------------------------------------------+
-input group "â•â•â• POSITION MANAGEMENT â•â•â•"
+input group "=== POSITION MANAGEMENT ==="
 input bool   Enable_Partial_TP = true;
 input double Partial_Percent = 50.0;
 input double Partial_At_RR = 1.0;
@@ -90,21 +92,21 @@ input double Trail_ATR_Mult = 1.5;
 //+------------------------------------------------------------------+
 //| RISK MANAGEMENT FTMO                                              |
 //+------------------------------------------------------------------+
-input group "â•â•â• RISK MANAGEMENT FTMO â•â•â•"
+input group "=== RISK MANAGEMENT FTMO ==="
 // AUDIT-C4: Dynamic sizing by risk % replaces fixed lot size
 input double Risk_Percent    = 1.0;   // % of equity risked per trade (default 1%)
 input double Max_Risk_Percent = 2.0;  // Hard cap on risk % per trade
-// AUDIT-C4: DEPRECATED — kept for backwards compatibility only; ignored when Risk_Percent > 0
+// AUDIT-C4: DEPRECATED -- kept for backwards compatibility only; ignored when Risk_Percent > 0
 input double Base_Lot_Size = 0.10;    // DEPRECATED: use Risk_Percent instead
 input int    Magic_Number = 888892;
 input double Max_Daily_Loss_EUR = 400.0;
 input double Max_Daily_Trades = 6;
-input double FTMO_Daily_DD_Limit = 4.5;    // % - arrÃªt Ã  4.5% (avant 5%)
+input double FTMO_Daily_DD_Limit = 4.5;    // % - arret a  4.5% (avant 5%)
 
 //+------------------------------------------------------------------+
 //| SESSION FILTER                                                    |
 //+------------------------------------------------------------------+
-input group "â•â•â• SESSION â•â•â•"
+input group "=== SESSION ==="
 input bool   Enable_Session_Filter = true;
 input string Session_Start = "08:00";
 input string Session_End = "20:00";
@@ -112,7 +114,7 @@ input string Session_End = "20:00";
 //+------------------------------------------------------------------+
 //| DISPLAY                                                           |
 //+------------------------------------------------------------------+
-input group "â•â•â• DISPLAY â•â•â•"
+input group "=== DISPLAY ==="
 input bool   Enable_Dashboard = true;
 input bool   Enable_Alerts = true;
 
@@ -127,10 +129,16 @@ struct NewsSignal {
    double   size_factor;      // 0.0 - 1.5
    string   timing_mode;      // CLEAR / BLACKOUT / PRE_NEWS_SETUP / POST_NEWS_ENTRY
    string   tp_mode;          // QUICK / NORMAL / EXTENDED
-   bool     wider_stops;      // true = SL Ã— 1.3
+   bool     wider_stops;      // true = SL x 1.3
    int      blackout_minutes; // Minutes restantes si blackout
    bool     is_valid;
    datetime last_update;
+   // Python Sniper fields
+   bool     sniper_valid;
+   int      sniper_score;
+   double   sniper_sl;
+   double   sniper_tp;
+   string   sniper_reason;
 };
 
 //+------------------------------------------------------------------+
@@ -156,14 +164,14 @@ SniperResultM15 g_LastSniper;
 //| EXPERT INITIALIZATION                                             |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+   Print("===========================================================");
    Print("   GOLD INSTITUTIONAL NEWS TRADING EA v2.1");
    Print("   M15 Entry + M5 Confirmation + ICT PD Arrays");
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+   Print("===========================================================");
    
    // CORRECTION 1: Validation Symbol
    if(_Symbol != "XAUUSD" && _Symbol != "XAUUSD.i" && _Symbol != "GOLD") {
-      Print("âš ï¸ WARNING: EA optimized for XAUUSD, running on ", _Symbol);
+      Print("[WARN] WARNING: EA optimized for XAUUSD, running on ", _Symbol);
    }
    
    trade.SetExpertMagicNumber(Magic_Number);
@@ -172,10 +180,10 @@ int OnInit() {
    // Initialize signal
    ResetSignal();
    
-   // CORRECTION 2: Initialize Sniper M15 avec gestion d'erreur amÃ©liorÃ©e
+   // CORRECTION 2: Initialize Sniper M15 avec gestion d'erreur amelioree
    g_sniper = new CSniperM15(_Symbol);
    if(g_sniper == NULL) {
-      Print("âŒ Failed to create Sniper M15 object");
+      Print("[ERROR] Failed to create Sniper M15 object");
       return INIT_FAILED;
    }
    
@@ -188,17 +196,17 @@ int OnInit() {
          true, 15,  // Session boost
          Sniper_SL_Buffer_Pips, Sniper_SL_Min_Pips, Sniper_SL_Max_Pips,
          Use_M5_Confirmation)) {
-      Print("âŒ Sniper M15 initialization failed");
+      Print("[ERROR] Sniper M15 initialization failed");
       delete g_sniper;
       g_sniper = NULL;
       return INIT_FAILED;
    }
-   Print("âœ… Sniper M15 initialized (M15 + M5 + ICT)");
+   Print("[OK] Sniper M15 initialized (M15 + M5 + ICT)");
    
    // CORRECTION 3: Initialize Position Manager avec validation
    g_posMgr = new CPositionManagerV2(_Symbol, Magic_Number);
    if(g_posMgr == NULL) {
-      Print("âŒ Failed to create Position Manager object");
+      Print("[ERROR] Failed to create Position Manager object");
       return INIT_FAILED;
    }
    
@@ -208,17 +216,17 @@ int OnInit() {
          Enable_Trailing, true, Trail_ATR_Mult,
          0.5, 10, true, 4.0, 200, 0.3,
          0.3, 0.5, 0.7, 0.9)) {
-      Print("âŒ Position Manager initialization failed");
+      Print("[ERROR] Position Manager initialization failed");
       delete g_posMgr;
       g_posMgr = NULL;
       return INIT_FAILED;
    }
-   Print("âœ… Position Manager initialized");
+   Print("[OK] Position Manager initialized");
    
    // CORRECTION 4: Initialize Quality Filters avec validation
    g_filters = new CQualityFilters(_Symbol, Magic_Number);
    if(g_filters == NULL) {
-      Print("âŒ Failed to create Quality Filters object");
+      Print("[ERROR] Failed to create Quality Filters object");
       return INIT_FAILED;
    }
    
@@ -229,31 +237,43 @@ int OnInit() {
          true, 30.0, 5,        // Same level
          true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0, 300.0,
          Enable_Session_Filter, Session_Start, Session_End, false)) {
-      Print("âŒ Quality Filters initialization failed");
+      Print("[ERROR] Quality Filters initialization failed");
       delete g_filters;
       g_filters = NULL;
       return INIT_FAILED;
    }
-   Print("âœ… Quality Filters initialized");
+   Print("[OK] Quality Filters initialized");
+   
+   // DataBridge: push OHLCV to Python VPS
+   g_bridge = new CDataBridge();
+   if(g_bridge == NULL) { Print("[ERROR] Failed to create DataBridge"); return INIT_FAILED; }
+   if(!g_bridge.Initialize(
+         "http://86.48.5.126:5002/v1/market_data",
+         API_Auth_Token, _Symbol, API_Refresh_Seconds, API_Timeout)) {
+      Print("[WARN] DataBridge init failed -- candle push disabled");
+   } else {
+      g_bridge.Send();
+      Print("[OK] DataBridge ready -> http://86.48.5.126:5002/v1/market_data");
+   }
    
    // CORRECTION 5: Initial API fetch avec meilleure gestion d'erreur
    if(FetchNewsSignal()) {
-      Print("âœ… API connected - Signal: ", g_Signal.direction, 
+      Print("[OK] API connected - Signal: ", g_Signal.direction, 
             " | Confidence: ", DoubleToString(g_Signal.confidence, 0), "%",
             " | Timing: ", g_Signal.timing_mode);
    } else {
-      Print("âš ï¸ API not available - Will retry (this is normal on first start)");
+      Print("[WARN] API not available - Will retry (this is normal on first start)");
    }
    
    g_DayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
    
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+   Print("===========================================================");
    Print("   READY - Waiting for signals...");
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+   Print("===========================================================");
    
-   // Timer pour refresh API mÃªme sans ticks
+   // Timer pour refresh API meme sans ticks
    EventSetTimer(60);
-   Print("â±ï¸ Timer initialized: API health check every 60s");
+   Print("[TIMER] Timer initialized: API health check every 60s");
    
    // AUDIT-C5: Resync open positions and daily stats on restart
    SyncOpenPositions();
@@ -268,7 +288,7 @@ int OnInit() {
 void OnDeinit(const int reason) {
    EventKillTimer();
    
-   // CORRECTION 6: Cleanup sÃ©curisÃ©
+   // CORRECTION 6: Cleanup securise
    if(g_sniper != NULL) {
       delete g_sniper;
       g_sniper = NULL;
@@ -281,10 +301,14 @@ void OnDeinit(const int reason) {
       delete g_filters;
       g_filters = NULL;
    }
+   if(g_bridge != NULL) {
+      delete g_bridge;
+      g_bridge = NULL;
+   }
    
    Comment("");
    
-   // CORRECTION 7: Logs de raison de dÃ©sinit
+   // CORRECTION 7: Logs de raison de desinit
    string reasonText = "";
    switch(reason) {
       case REASON_PROGRAM:     reasonText = "Program terminated"; break;
@@ -310,7 +334,7 @@ void OnTick() {
    // CORRECTION 8: New day reset avec validation
    datetime today = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
    if(today > g_DayStart) {  // Utiliser > au lieu de !=
-      Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• NEW TRADING DAY â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+      Print("=============== NEW TRADING DAY ===============");
       g_DayStart = today;
       g_TradesToday = 0;
       g_DailyPnL = 0;
@@ -334,7 +358,7 @@ void OnTick() {
       return;
    }
    
-   // CORRECTION 9: Weekend guard amÃ©liorÃ©
+   // CORRECTION 9: Weekend guard ameliore
    MqlDateTime dt;
    TimeCurrent(dt);
    if(dt.day_of_week == 0 || dt.day_of_week == 6) {
@@ -350,7 +374,7 @@ void OnTick() {
          // Log silencieux, pas de spam
          static datetime lastWarning = 0;
          if(TimeCurrent() - lastWarning > 300) {  // Max 1 warning / 5 min
-            Print("âš ï¸ API fetch failed - will retry");
+            Print("[WARN] API fetch failed - will retry");
             lastWarning = TimeCurrent();
          }
       }
@@ -366,7 +390,7 @@ void OnTick() {
 //| TIMER FUNCTION - API health check sans ticks                      |
 //+------------------------------------------------------------------+
 void OnTimer() {
-   // Skip si en position (OnTick gÃ¨re dÃ©jÃ )
+   // Skip si en position (OnTick gere deja )
    if(g_InPosition) return;
    
    // Skip weekend
@@ -375,13 +399,15 @@ void OnTimer() {
    if(dt.day_of_week == 0 || dt.day_of_week == 6) return;
    
    // CORRECTION 11: Refresh API avec throttling
+   if(g_bridge != NULL) g_bridge.SendIfDue();
+   
    if((TimeCurrent() - g_LastAPICall) >= API_Refresh_Seconds) {
-      // Silencieux sauf si succÃ¨s
+      // Silencieux sauf si succes
       if(FetchNewsSignal()) {
          static string lastMode = "";
          // Ne print que si timing_mode change
          if(g_Signal.timing_mode != lastMode) {
-            Print("ðŸ”„ Timer: API OK - ", g_Signal.direction, 
+            Print("[REFRESH] Timer: API OK - ", g_Signal.direction, 
                   " | Confidence: ", g_Signal.confidence, 
                   "% | Timing: ", g_Signal.timing_mode);
             lastMode = g_Signal.timing_mode;
@@ -404,7 +430,7 @@ bool FetchNewsSignal() {
    
    ResetLastError();
    
-   // CORRECTION 12: Gestion WebRequest amÃ©liorÃ©e
+   // CORRECTION 12: Gestion WebRequest amelioree
    int res = WebRequest("GET", API_News_URL, headers, API_Timeout, 
                         post_data, result_data, result_headers);
    
@@ -416,7 +442,7 @@ bool FetchNewsSignal() {
          // Log une seule fois
          static bool warned = false;
          if(!warned) {
-            Print("âš ï¸ Add URL to MT5: Tools > Options > Expert Advisors");
+            Print("[WARN] Add URL to MT5: Tools > Options > Expert Advisors");
             Print("   URL: ", API_News_URL);
             warned = true;
          }
@@ -428,7 +454,7 @@ bool FetchNewsSignal() {
    if(res != 200) {
       static int lastError = 0;
       if(res != lastError) {  // Log seulement si erreur change
-         Print("âŒ API HTTP Error: ", res);
+         Print("[ERROR] API HTTP Error: ", res);
          lastError = res;
       }
       g_Signal.is_valid = false;
@@ -454,7 +480,7 @@ bool ParseSignalJSON(string json) {
       return false;
    }
 
-   // AUDIT-C1: Use CJsonParser — robust, whitespace/space-tolerant, handles null values
+   // AUDIT-C1: Use CJsonParser -- robust, whitespace/space-tolerant, handles null values
    CJsonParser parser;
    if(!parser.Parse(json)) {
       Print("WARNING ParseSignalJSON: CJsonParser failed to parse JSON");
@@ -467,7 +493,7 @@ bool ParseSignalJSON(string json) {
       Print("[AUDIT-C1] Response signature present: ", StringSubstr(signature, 0, 16), "...");
    }
 
-   // can_trade — AUDIT-C1: GetBool tolerates any spacing around ':'
+   // can_trade -- AUDIT-C1: GetBool tolerates any spacing around ':'
    bool canTrade = false;
    if(!parser.GetBool("can_trade", canTrade))
       canTrade = false;
@@ -515,12 +541,12 @@ bool ParseSignalJSON(string json) {
       tpMode = "NORMAL";
    g_Signal.tp_mode = tpMode;
 
-   // wider_stops — AUDIT-C1: GetBool handles all spacing variants
+   // wider_stops -- AUDIT-C1: GetBool handles all spacing variants
    bool widerStops = false;
    parser.GetBool("wider_stops", widerStops);
    g_Signal.wider_stops = widerStops;
 
-   // blackout_minutes — parsed manually to stay silent when field is null or absent.
+   // blackout_minutes -- parsed manually to stay silent when field is null or absent.
    // The API sends 0 (integer) in CLEAR mode and the actual minute count in BLACKOUT
    // mode. Using GetInt would trigger a JsonParser WARNING on null, so we read the
    // raw JSON directly: find the key, skip whitespace, reject "null", parse the int.
@@ -545,6 +571,28 @@ bool ParseSignalJSON(string json) {
    if(blackoutMin < 0) blackoutMin = 0;
    g_Signal.blackout_minutes = blackoutMin;
 
+   bool sniperValid = false;
+   parser.GetBool("sniper_valid", sniperValid);
+   g_Signal.sniper_valid = sniperValid;
+
+   double sniperScore = 0;
+   parser.GetDouble("sniper_score", sniperScore);
+   g_Signal.sniper_score = (int)sniperScore;
+
+   double sniperSL = 0;
+   parser.GetDouble("sniper_sl", sniperSL);
+   if(sniperSL < 0) sniperSL = 0;
+   g_Signal.sniper_sl = sniperSL;
+
+   double sniperTP = 0;
+   parser.GetDouble("sniper_tp", sniperTP);
+   if(sniperTP < 0) sniperTP = 0;
+   g_Signal.sniper_tp = sniperTP;
+
+   string sniperReason = "";
+   parser.GetString("sniper_reason", sniperReason);
+   g_Signal.sniper_reason = sniperReason;
+
    g_Signal.is_valid    = true;
    g_Signal.last_update = TimeCurrent();
 
@@ -564,7 +612,7 @@ void CheckEntry() {
    if((TimeCurrent() - g_Signal.last_update) > 300) {  // 5 minutes
       static datetime lastWarning = 0;
       if(TimeCurrent() - lastWarning > 600) {
-         Print("âš ï¸ Signal too old (", (TimeCurrent() - g_Signal.last_update), "s)");
+         Print("[WARN] Signal too old (", (TimeCurrent() - g_Signal.last_update), "s)");
          lastWarning = TimeCurrent();
       }
       return;
@@ -615,17 +663,17 @@ void CheckEntry() {
    // STEP 5: QUALITY FILTERS
    //================================================================
    if(g_filters != NULL) {
-      // Use ASK for BUY entries, BID for SELL entries — filters must evaluate
+      // Use ASK for BUY entries, BID for SELL entries -- filters must evaluate
       // against the actual entry price, not always BID (avoids spread-induced asymmetry)
       double price = (direction == "BUY")
                      ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                      : SymbolInfoDouble(_Symbol, SYMBOL_BID);
       FilterResult fr = g_filters.CheckAllFilters(direction, price);
       if(!fr.passed) {
-         // Log silencieux sauf premiÃ¨re fois
+         // Log silencieux sauf premiere fois
          static string lastReason = "";
          if(fr.blockReason != lastReason) {
-            Print("ðŸš« Filter blocked: ", fr.blockReason);
+            Print("[BLOCK] Filter blocked: ", fr.blockReason);
             lastReason = fr.blockReason;
          }
          return;
@@ -633,39 +681,31 @@ void CheckEntry() {
    }
    
    //================================================================
-   // STEP 6: SNIPER M15 ENTRY (Find precise entry point)
+   // STEP 6: PYTHON SNIPER GATE (replaces MQL5 CSniperM15)
    //================================================================
-   // CORRECTION 18: Validation sniper existe
-   if(g_sniper == NULL) {
-      Print("âŒ CheckEntry: Sniper is NULL");
+   if(!g_Signal.sniper_valid) {
+      static datetime lastWarnSniper = 0;
+      if(TimeCurrent() - lastWarnSniper > 60) {
+         Print("[SNIPER] Waiting for Python sniper (sniper_valid=false)");
+         lastWarnSniper = TimeCurrent();
+      }
       return;
    }
-   
-   // Adjust score threshold based on timing mode
-   int scoreThreshold = Sniper_Min_Score;
-   if(g_Signal.timing_mode == "POST_NEWS_ENTRY") {
-      scoreThreshold = 50;  // Lower for fade opportunities
-   }
-   
-   g_LastSniper = g_sniper.AnalyzeEntry(direction, g_Signal.confidence, g_Signal.timing_mode);
-   
-   if(!g_LastSniper.isValid) {
-      return;  // No valid entry on M15
-   }
-   
-   if(g_LastSniper.score < scoreThreshold) {
+   if(g_Signal.sniper_sl <= 0 || g_Signal.sniper_tp <= 0) {
+      static datetime lastWarnSL = 0;
+      if(TimeCurrent() - lastWarnSL > 60) {
+         Print("[SNIPER] Invalid SL/TP from Python (sl=",
+               DoubleToString(g_Signal.sniper_sl, 2),
+               " tp=", DoubleToString(g_Signal.sniper_tp, 2), ")");
+         lastWarnSL = TimeCurrent();
+      }
       return;
    }
-   
-   // Log sniper analysis
-   Print("ðŸŽ¯ SNIPER M15 VALIDATED:");
-   Print("   Score: ", g_LastSniper.score);
-   Print("   Sweep: ", g_LastSniper.sweep.detected ? "YES" : "NO");
-   Print("   BOS: ", g_LastSniper.bos.detected ? g_LastSniper.bos.direction : "NONE");
-   Print("   PD: ", g_LastSniper.pullback.pdType,
-         " | Mitigated: ", g_LastSniper.pullback.mitigated ? "YES" : "NO",
-         " | CHoCH M5: ", g_LastSniper.pullback.chochM5 ? "YES" : "NO");
-   Print("   M5 Pattern: ", g_LastSniper.m5Confirm.patternName);
+   Print("[TARGET] Python sniper validated:");
+   Print("   Score: ", g_Signal.sniper_score);
+   Print("   SL: ", DoubleToString(g_Signal.sniper_sl, 2));
+   Print("   TP: ", DoubleToString(g_Signal.sniper_tp, 2));
+   Print("   Reason: ", g_Signal.sniper_reason);
    
    //================================================================
    // STEP 7: EXECUTE TRADE
@@ -694,17 +734,31 @@ void ExecuteTrade(string direction) {
       return;
    }
 
-   // Get SL from Sniper (needed for lot calculation)
-   double slPips = g_LastSniper.slPips;
+   // Entry, SL, TP from Python Sniper
+   double entry = (direction == "BUY") ? ask : bid;
+   double sl    = g_Signal.sniper_sl;
+   double tp    = g_Signal.sniper_tp;
 
-   // CORRECTION 21: Validation SL
-   if(slPips < Sniper_SL_Min_Pips) slPips = Sniper_SL_Min_Pips;
-   if(slPips > Sniper_SL_Max_Pips) slPips = Sniper_SL_Max_Pips;
+   // Compute slPips from actual Python SL distance (for lot sizing)
+   double slPips = MathAbs(entry - sl) / (point * 10);
 
-   // Apply wider stops if indicated
+   // Sanity check: Python SL must be within plausible range for XAUUSD
+   if(slPips < 3.0 || slPips > 200.0) {
+      Print("[ERROR] Python sniper SL out of range: ", DoubleToString(slPips, 1),
+            " pips -- trade blocked");
+      return;
+   }
+
+   // Apply wider stops if indicated -- extend SL further from entry by 30%
    if(g_Signal.wider_stops) {
+      double extension = slPips * 0.3 * point * 10;
+      sl     = (direction == "BUY") ? sl - extension : sl + extension;
       slPips *= 1.3;
    }
+
+   // Derive tpPips and RR from Python-provided prices (for logging)
+   double tpPips = MathAbs(tp - entry) / (point * 10);
+   double tpRR   = (slPips > 0) ? (tpPips / slPips) : 0;
 
    // ---------------------------------------------------------------
    // AUDIT-C4: Dynamic lot sizing from Risk_Percent
@@ -769,26 +823,7 @@ void ExecuteTrade(string direction) {
          return;
       }
    } else {
-      Print("[AUDIT-C4] WARNING: OrderCalcMargin failed — proceeding without margin check");
-   }
-
-   // Calculate TP based on tp_mode
-   double tpRR = 1.5;  // Default
-   if(g_Signal.tp_mode == "QUICK") tpRR = 1.0;
-   else if(g_Signal.tp_mode == "EXTENDED") tpRR = 2.5;
-
-   double tpPips = slPips * tpRR;
-
-   // Calculate prices
-   double entry, sl, tp;
-   if(direction == "BUY") {
-      entry = ask;
-      sl = entry - slPips * point * 10;
-      tp = entry + tpPips * point * 10;
-   } else {
-      entry = bid;
-      sl = entry + slPips * point * 10;
-      tp = entry - tpPips * point * 10;
+      Print("[AUDIT-C4] WARNING: OrderCalcMargin failed -- proceeding without margin check");
    }
 
    // CORRECTION 22: Normalize SL/TP
@@ -816,8 +851,8 @@ void ExecuteTrade(string direction) {
    Print("   SL: ", DoubleToString(sl, digits), " (", DoubleToString(slPips, 1), " pips)");
    Print("   TP: ", DoubleToString(tp, digits), " (", DoubleToString(tpPips, 1), " pips)");
    Print("   RR: 1:", DoubleToString(tpRR, 1));
-   Print("   Sniper M15 Score: ", g_LastSniper.score);
-   Print("   M5 Pattern: ", g_LastSniper.m5Confirm.patternName);
+   Print("   Python Sniper Score: ", g_Signal.sniper_score);
+   Print("   Python Sniper Reason: ", g_Signal.sniper_reason);
    Print("===========================================================");
 
    // Execute
@@ -871,7 +906,7 @@ void ExecuteTrade(string direction) {
 void ManagePosition() {
    // CORRECTION 24: Validation ticket existe
    if(g_Ticket == 0) {
-      Print("âš ï¸ ManagePosition: Invalid ticket (0)");
+      Print("[WARN] ManagePosition: Invalid ticket (0)");
       g_InPosition = false;
       return;
    }
@@ -884,7 +919,7 @@ void ManagePosition() {
    
    // CORRECTION 25: Validation Position Manager
    if(g_posMgr == NULL) {
-      Print("âš ï¸ ManagePosition: Position Manager is NULL");
+      Print("[WARN] ManagePosition: Position Manager is NULL");
       return;
    }
    
@@ -899,7 +934,7 @@ void ManagePosition() {
 }
 
 //+------------------------------------------------------------------+
-//| Close Position Handler (Version CorrigÃ©e)                        |
+//| Close Position Handler (Version Corrigee)                        |
 //+------------------------------------------------------------------+
 void ClosePositionHandler() {
    double profit = 0;
@@ -908,13 +943,13 @@ void ClosePositionHandler() {
    // CORRECTION 26: Attendre MAJ historique
    Sleep(100);
    
-   // MÃ©thode 1: Chercher dans l'historique par position ID
+   // Methode 1: Chercher dans l'historique par position ID
    if(HistorySelectByPosition(g_Ticket)) {
       int totalDeals = HistoryDealsTotal();
       for(int i = totalDeals - 1; i >= 0; i--) {
          ulong dealTicket = HistoryDealGetTicket(i);
          if(dealTicket > 0) {
-            // VÃ©rifier que c'est bien un deal d'OUT (fermeture)
+            // Verifier que c'est bien un deal d'OUT (fermeture)
             ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
             if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_INOUT) {
                profit += HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
@@ -926,9 +961,9 @@ void ClosePositionHandler() {
       }
    }
    
-   // MÃ©thode 2: Si profit toujours 0, chercher dans l'historique rÃ©cent
+   // Methode 2: Si profit toujours 0, chercher dans l'historique recent
    if(profit == 0 && closePrice == 0) {
-      datetime fromTime = TimeCurrent() - 3600;  // DerniÃ¨re heure
+      datetime fromTime = TimeCurrent() - 3600;  // Derniere heure
       datetime toTime = TimeCurrent() + 60;
       
       if(HistorySelect(fromTime, toTime)) {
@@ -936,7 +971,7 @@ void ClosePositionHandler() {
          for(int i = totalDeals - 1; i >= 0; i--) {
             ulong dealTicket = HistoryDealGetTicket(i);
             if(dealTicket > 0) {
-               // VÃ©rifier le magic number
+               // Verifier le magic number
                long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
                if(dealMagic == Magic_Number) {
                   ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
@@ -953,7 +988,7 @@ void ClosePositionHandler() {
       }
    }
    
-   // Mettre Ã  jour les stats
+   // Mettre a  jour les stats
    g_DailyPnL += profit;
    
    // Enregistrer dans Quality Filters
@@ -962,18 +997,18 @@ void ClosePositionHandler() {
    }
    
    // Log
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+   Print("===========================================================");
    Print("   POSITION CLOSED");
    if(profit > 0) {
-      Print("   Result: WIN âœ…");
+      Print("   Result: WIN [OK]");
    } else if(profit < 0) {
-      Print("   Result: LOSS âŒ");
+      Print("   Result: LOSS [ERROR]");
    } else {
-      Print("   Result: BREAKEVEN âš–ï¸");
+      Print("   Result: BREAKEVEN [SCALE]");
    }
    Print("   P&L: ", DoubleToString(profit, 2), " EUR");
    Print("   Daily Total: ", DoubleToString(g_DailyPnL, 2), " EUR");
-   Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+   Print("===========================================================");
    
    // Reset position state
    g_InPosition = false;
@@ -988,16 +1023,16 @@ bool CheckFTMOLimits() {
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    
-   // CORRECTION 27: Protection division par zÃ©ro
+   // CORRECTION 27: Protection division par zero
    if(balance <= 0) {
-      Print("âŒ CheckFTMOLimits: Invalid balance (", balance, ")");
+      Print("[ERROR] CheckFTMOLimits: Invalid balance (", balance, ")");
       return false;
    }
    
    double ddPercent = ((balance - equity) / balance) * 100;
    
    if(ddPercent >= FTMO_Daily_DD_Limit) {
-      Print("ðŸš¨ FTMO DAILY DD LIMIT REACHED (", DoubleToString(ddPercent, 1), "%)");
+      Print("[ALERT] FTMO DAILY DD LIMIT REACHED (", DoubleToString(ddPercent, 1), "%)");
       return false;
    }
    
@@ -1023,10 +1058,15 @@ void ResetSignal() {
    g_Signal.blackout_minutes = 0;
    g_Signal.is_valid = false;
    g_Signal.last_update = 0;
+   g_Signal.sniper_valid  = false;
+   g_Signal.sniper_score  = 0;
+   g_Signal.sniper_sl     = 0.0;
+   g_Signal.sniper_tp     = 0.0;
+   g_Signal.sniper_reason = "";
 }
 
 //+------------------------------------------------------------------+
-//| UPDATE DASHBOARD - Version CorrigÃ©e                              |
+//| UPDATE DASHBOARD - Version Corrigee                              |
 //+------------------------------------------------------------------+
 void UpdateDashboard() {
    string line1 = "=== GOLD INSTITUTIONAL NEWS EA v2.1 ===";
@@ -1037,8 +1077,8 @@ void UpdateDashboard() {
       sigStatus = "Signal: [X] No Data";
    } else {
       string arrow = "-";
-      if(g_Signal.direction == "BUY") arrow = "[â†‘BUY]";
-      else if(g_Signal.direction == "SELL") arrow = "[â†“SELL]";
+      if(g_Signal.direction == "BUY") arrow = "[[^]BUY]";
+      else if(g_Signal.direction == "SELL") arrow = "[[v]SELL]";
       
       sigStatus = StringFormat("Signal: %s %.0f%% | Size: %.2fx",
                                arrow, g_Signal.confidence, g_Signal.size_factor);
@@ -1047,9 +1087,9 @@ void UpdateDashboard() {
    // Timing status
    string timingStatus = "";
    string timingIcon = "[OK]";
-   if(g_Signal.timing_mode == "BLACKOUT") timingIcon = "[ðŸ›‘STOP]";
-   else if(g_Signal.timing_mode == "PRE_NEWS_SETUP") timingIcon = "[â³WAIT]";
-   else if(g_Signal.timing_mode == "POST_NEWS_ENTRY") timingIcon = "[ðŸŽ¯GO]";
+   if(g_Signal.timing_mode == "BLACKOUT") timingIcon = "[[STOP]STOP]";
+   else if(g_Signal.timing_mode == "PRE_NEWS_SETUP") timingIcon = "[[WAIT]WAIT]";
+   else if(g_Signal.timing_mode == "POST_NEWS_ENTRY") timingIcon = "[[TARGET]GO]";
    
    timingStatus = StringFormat("Timing: %s %s", timingIcon, g_Signal.timing_mode);
    
@@ -1062,15 +1102,13 @@ void UpdateDashboard() {
       StringFormat("Position: %s #%d", g_CurrentDirection, g_Ticket) :
       "Position: None";
    
-   // Sniper M15 status
+   // Python sniper status
    string sniperStatus = "";
-   if(g_LastSniper.score > 0) {
-      sniperStatus = StringFormat("Sniper M15: %d/60 | PD: %s | M5: %s", 
-                                   g_LastSniper.score,
-                                   g_LastSniper.pullback.pdType,
-                                   g_LastSniper.m5Confirm.patternName);
+   if(g_Signal.sniper_valid) {
+      sniperStatus = StringFormat("[TARGET] Python Sniper: %d | SL %.2f | TP %.2f",
+                                   g_Signal.sniper_score, g_Signal.sniper_sl, g_Signal.sniper_tp);
    } else {
-      sniperStatus = "Sniper M15: Waiting...";
+      sniperStatus = "[SNIPER] Waiting for Python sniper...";
    }
    
    // P&L
@@ -1140,9 +1178,9 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    if(id != CHARTEVENT_KEYDOWN) return;
    
    if(lparam == 'I') {  // Info
-      Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+      Print("===========================================================");
       Print("   CURRENT STATUS");
-      Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+      Print("===========================================================");
       Print("   Signal Valid: ", g_Signal.is_valid);
       Print("   Can Trade: ", g_Signal.can_trade);
       Print("   Direction: ", g_Signal.direction);
@@ -1153,38 +1191,38 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       Print("   TP Mode: ", g_Signal.tp_mode);
       Print("   Wider Stops: ", g_Signal.wider_stops);
       Print("   Position: ", g_InPosition ? g_CurrentDirection : "None");
-      Print("   Daily P&L: â‚¬", g_DailyPnL);
+      Print("   Daily P&L: EUR", g_DailyPnL);
       Print("   Trades Today: ", g_TradesToday, "/", (int)Max_Daily_Trades);
       
-      // Sniper info
-      if(g_LastSniper.score > 0) {
-         Print("   â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€");
-         Print("   Last Sniper M15 Analysis:");
-         Print("   Score: ", g_LastSniper.score);
-         Print("   Valid: ", g_LastSniper.isValid ? "YES" : "NO");
-         Print("   PD Array: ", g_LastSniper.pullback.pdType);
-         Print("   CHoCH M5: ", g_LastSniper.pullback.chochM5 ? "YES" : "NO");
+      // Python sniper info
+      Print("   ---------------------------------------------------");
+      Print("   Python Sniper: valid=", g_Signal.sniper_valid,
+            " score=", g_Signal.sniper_score);
+      if(g_Signal.sniper_valid) {
+         Print("   SL: ", DoubleToString(g_Signal.sniper_sl, 2),
+               " | TP: ", DoubleToString(g_Signal.sniper_tp, 2));
+         Print("   Reason: ", g_Signal.sniper_reason);
       }
       
-      Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+      Print("===========================================================");
    }
    else if(lparam == 'U') {  // Force update
-      Print("ðŸ”„ Force API update...");
+      Print("[REFRESH] Force API update...");
       if(FetchNewsSignal()) {
-         Print("âœ… Updated - Direction: ", g_Signal.direction, 
+         Print("[OK] Updated - Direction: ", g_Signal.direction, 
                " | Timing: ", g_Signal.timing_mode,
                " | Confidence: ", g_Signal.confidence, "%");
       } else {
-         Print("âŒ Update failed");
+         Print("[ERROR] Update failed");
       }
    }
    else if(lparam == 'S') {  // Sniper analysis
       if(g_sniper != NULL && g_Signal.direction != "NONE") {
-         Print("ðŸ” Running Sniper M15 analysis for ", g_Signal.direction, "...");
+         Print("[SEARCH] Running Sniper M15 analysis for ", g_Signal.direction, "...");
          SniperResultM15 result = g_sniper.AnalyzeEntry(g_Signal.direction, g_Signal.confidence, g_Signal.timing_mode);
          g_sniper.PrintAnalysis(result);
       } else {
-         Print("âš ï¸ Cannot run sniper: No valid signal direction");
+         Print("[WARN] Cannot run sniper: No valid signal direction");
       }
    }
    else if(lparam == 'F') {  // Filters status
@@ -1213,7 +1251,7 @@ void SyncOpenPositions() {
       string sym = PositionGetString(POSITION_SYMBOL);
       if(sym != _Symbol) continue;
 
-      // AUDIT-C5: Found a managed position — restore state
+      // AUDIT-C5: Found a managed position -- restore state
       ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       string tradeType = (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
 
@@ -1278,7 +1316,7 @@ void RecalcDailyStats() {
          " PnL=", DoubleToString(totalPnL, 2));
 
    // AUDIT-C5: Sync Quality Filters daily counters if the method is available
-   // (CQualityFilters does not expose SetDailyStats — counters are managed internally
+   // (CQualityFilters does not expose SetDailyStats -- counters are managed internally
    //  via RecordTradeOpen/Close. Calling ResetDaily + re-recording would risk
    //  mismatching filter state, so we only sync the global counters above.)
 }
