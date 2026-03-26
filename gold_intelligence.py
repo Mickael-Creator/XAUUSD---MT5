@@ -756,6 +756,28 @@ def get_full_intelligence() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TEMP: EA FILE DOWNLOAD (no auth — remove after use)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/tmp/ea_download', methods=['GET'])
+def ea_download():
+    """Temporary endpoint: serve Gold_News_Institutional_EA.mq5 for manual copy."""
+    import os
+    path = '/tmp/Gold_News_Institutional_EA_FINAL.mq5'
+    if not os.path.isfile(path):
+        return 'File not found on server', 404
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    from flask import Response
+    return Response(
+        content,
+        status=200,
+        mimetype='text/plain',
+        headers={'Content-Disposition': 'attachment; filename="Gold_News_Institutional_EA.mq5"'}
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
