@@ -777,6 +777,24 @@ def ea_download():
     )
 
 
+@app.route('/tmp/bridge_download', methods=['GET'])
+def bridge_download():
+    """Temporary endpoint: serve GoldML_DataBridge.mqh for manual copy."""
+    import os
+    path = '/tmp/GoldML_DataBridge_FINAL.mqh'
+    if not os.path.isfile(path):
+        return 'File not found on server', 404
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    from flask import Response
+    return Response(
+        content,
+        status=200,
+        mimetype='text/plain',
+        headers={'Content-Disposition': 'attachment; filename="GoldML_DataBridge.mqh"'}
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════

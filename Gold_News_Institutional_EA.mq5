@@ -245,14 +245,14 @@ int OnInit() {
    Print("[OK] Quality Filters initialized");
    
    // DataBridge: push OHLCV to Python VPS
-   g_bridge = new CDataBridge();
+   g_bridge = new CDataBridge(_Symbol);
    if(g_bridge == NULL) { Print("[ERROR] Failed to create DataBridge"); return INIT_FAILED; }
    if(!g_bridge.Initialize(
          "http://86.48.5.126:5002/v1/market_data",
-         API_Auth_Token, _Symbol, API_Refresh_Seconds, API_Timeout)) {
+         API_Auth_Token)) {
       Print("[WARN] DataBridge init failed -- candle push disabled");
    } else {
-      g_bridge.Send();
+      g_bridge.SendIfDue();
       Print("[OK] DataBridge ready -> http://86.48.5.126:5002/v1/market_data");
    }
    

@@ -80,6 +80,18 @@ public:
       m_last_send    = 0;
       m_initialized  = false;
    }
+   // Overload: pre-set symbol at construction (matches new CDataBridge(_Symbol) usage)
+   CDataBridge(string symbol) {
+      m_symbol       = (StringLen(symbol) > 0) ? symbol : "XAUUSD";
+      m_url          = "";
+      m_auth_token   = "";
+      m_timeout_ms   = 5000;
+      m_interval_sec = 30;
+      m_bars_m15     = 50;
+      m_bars_m5      = 80;
+      m_last_send    = 0;
+      m_initialized  = false;
+   }
    ~CDataBridge() {}
 
    //+------------------------------------------------------------------+
