@@ -41,6 +41,7 @@ CQualityFilters* g_filters = NULL;
 input group "â•â•â• API NEWS TRADING â•â•â•"
 // AUDIT-VPS-C4: Default URL updated to versioned endpoint
 input string API_News_URL = "http://86.48.5.126:5002/v1/news_trading_signal/quick";
+input string API_MarketData_URL = "http://86.48.5.126:5002/v1/market_data";
 input int    API_Timeout = 5000;
 input int    API_Refresh_Seconds = 30;
 // AUDIT-VPS-C1: Bearer token for API authentication — set in EA inputs, never hardcode
@@ -138,6 +139,7 @@ struct NewsSignal {
 //+------------------------------------------------------------------+
 NewsSignal g_Signal;
 datetime g_LastAPICall = 0;
+datetime g_LastMarketPush = 0;
 
 // Position state
 bool g_InPosition = false;
@@ -245,6 +247,9 @@ int OnInit() {
       Print("âš ï¸ API not available - Will retry (this is normal on first start)");
    }
    
+   // Initial push of M15/M5 candles to VPS for Sniper ICT analysis
+   PushMarketData();
+
    g_DayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
    
    Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
@@ -355,10 +360,15 @@ void OnTick() {
          }
       }
    }
-   
+
+   // Push M15/M5 candles to VPS for Sniper ICT analysis
+   if((TimeCurrent() - g_LastMarketPush) >= API_Refresh_Seconds) {
+      PushMarketData();
+   }
+
    // Check for entry
    CheckEntry();
-   
+
    if(Enable_Dashboard) UpdateDashboard();
 }
 
@@ -443,6 +453,104 @@ bool FetchNewsSignal() {
    
    // Parse JSON
    return ParseSignalJSON(json);
+}
+
+//+------------------------------------------------------------------+
+//| PUSH M15/M5 MARKET DATA TO VPS                                    |
+//+------------------------------------------------------------------+
+void PushMarketData() {
+   // Build JSON: {"m15":[[t,o,h,l,c,v],...], "m5":[[t,o,h,l,c,v],...]}
+   string json = "{";
+
+   // --- M15 bars (last 30 = 7.5h) ---
+   int m15_count = 30;
+   double m15_o[], m15_h[], m15_l[], m15_c[];
+   long   m15_v[];
+   datetime m15_t[];
+   int got_m15 = CopyOpen(_Symbol, PERIOD_M15, 0, m15_count, m15_o);
+   if(got_m15 > 0) {
+      CopyHigh(_Symbol,  PERIOD_M15, 0, got_m15, m15_h);
+      CopyLow(_Symbol,   PERIOD_M15, 0, got_m15, m15_l);
+      CopyClose(_Symbol, PERIOD_M15, 0, got_m15, m15_c);
+      CopyTickVolume(_Symbol, PERIOD_M15, 0, got_m15, m15_v);
+      CopyTime(_Symbol,  PERIOD_M15, 0, got_m15, m15_t);
+
+      json += "\"m15\":[";
+      for(int i = 0; i < got_m15; i++) {
+         if(i > 0) json += ",";
+         json += "[" + IntegerToString((long)m15_t[i]) + ","
+                     + DoubleToString(m15_o[i], 2) + ","
+                     + DoubleToString(m15_h[i], 2) + ","
+                     + DoubleToString(m15_l[i], 2) + ","
+                     + DoubleToString(m15_c[i], 2) + ","
+                     + IntegerToString(m15_v[i]) + "]";
+      }
+      json += "]";
+   } else {
+      json += "\"m15\":[]";
+   }
+
+   // --- M5 bars (last 30 = 2.5h) ---
+   int m5_count = 30;
+   double m5_o[], m5_h[], m5_l[], m5_c[];
+   long   m5_v[];
+   datetime m5_t[];
+   int got_m5 = CopyOpen(_Symbol, PERIOD_M5, 0, m5_count, m5_o);
+   if(got_m5 > 0) {
+      CopyHigh(_Symbol,  PERIOD_M5, 0, got_m5, m5_h);
+      CopyLow(_Symbol,   PERIOD_M5, 0, got_m5, m5_l);
+      CopyClose(_Symbol, PERIOD_M5, 0, got_m5, m5_c);
+      CopyTickVolume(_Symbol, PERIOD_M5, 0, got_m5, m5_v);
+      CopyTime(_Symbol,  PERIOD_M5, 0, got_m5, m5_t);
+
+      json += ",\"m5\":[";
+      for(int i = 0; i < got_m5; i++) {
+         if(i > 0) json += ",";
+         json += "[" + IntegerToString((long)m5_t[i]) + ","
+                     + DoubleToString(m5_o[i], 2) + ","
+                     + DoubleToString(m5_h[i], 2) + ","
+                     + DoubleToString(m5_l[i], 2) + ","
+                     + DoubleToString(m5_c[i], 2) + ","
+                     + IntegerToString(m5_v[i]) + "]";
+      }
+      json += "]";
+   } else {
+      json += ",\"m5\":[]";
+   }
+
+   json += "}";
+
+   // --- POST to VPS ---
+   string headers = "Content-Type: application/json\r\n";
+   if(StringLen(API_Auth_Token) > 0)
+      headers += "Authorization: Bearer " + API_Auth_Token + "\r\n";
+
+   char post_data[];
+   StringToCharArray(json, post_data, 0, WHOLE_ARRAY, CP_UTF8);
+   // Remove trailing null byte added by StringToCharArray
+   ArrayResize(post_data, ArraySize(post_data) - 1);
+
+   char result_data[];
+   string result_headers;
+
+   ResetLastError();
+   int res = WebRequest("POST", API_MarketData_URL, headers, API_Timeout,
+                        post_data, result_data, result_headers);
+
+   if(res == 200) {
+      g_LastMarketPush = TimeCurrent();
+      static bool first = true;
+      if(first) {
+         Print("M15/M5 market data push OK (", got_m15, "/", got_m5, " bars)");
+         first = false;
+      }
+   } else {
+      static datetime lastWarn = 0;
+      if(TimeCurrent() - lastWarn > 300) {
+         Print("Market data push failed: HTTP ", res, " err=", GetLastError());
+         lastWarn = TimeCurrent();
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
