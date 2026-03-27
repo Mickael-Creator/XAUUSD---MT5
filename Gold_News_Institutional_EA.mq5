@@ -797,6 +797,33 @@ void ExecuteTrade(string direction) {
    tp    = NormalizeDouble(tp, digits);
    entry = NormalizeDouble(entry, digits);
 
+   // CORRECTION 28: Validate SL/TP are on the correct side of entry price
+   // BUY: SL must be below entry, TP must be above entry
+   // SELL: SL must be above entry, TP must be below entry
+   if(direction == "BUY") {
+      if(sl >= entry) {
+         Print("[SAFETY] BLOCKED: BUY order with SL (", DoubleToString(sl, digits),
+               ") >= entry (", DoubleToString(entry, digits), ") — SL must be BELOW entry for BUY");
+         return;
+      }
+      if(tp <= entry) {
+         Print("[SAFETY] BLOCKED: BUY order with TP (", DoubleToString(tp, digits),
+               ") <= entry (", DoubleToString(entry, digits), ") — TP must be ABOVE entry for BUY");
+         return;
+      }
+   } else {
+      if(sl <= entry) {
+         Print("[SAFETY] BLOCKED: SELL order with SL (", DoubleToString(sl, digits),
+               ") <= entry (", DoubleToString(entry, digits), ") — SL must be ABOVE entry for SELL");
+         return;
+      }
+      if(tp >= entry) {
+         Print("[SAFETY] BLOCKED: SELL order with TP (", DoubleToString(tp, digits),
+               ") >= entry (", DoubleToString(entry, digits), ") — TP must be BELOW entry for SELL");
+         return;
+      }
+   }
+
    // Build comment
    string comment = StringFormat("GML_%s_%s_%.0f",
                                   g_Signal.timing_mode,
