@@ -33,6 +33,13 @@ CLAUDE_CONFIG = {
     "min_interval_seconds": 30,
     "temperature": 0.2,
     "backoff_529": [60, 120, 300],  # Exponential backoff on 529 Overloaded
+    # Cost optimization
+    "trading_hours_start": 7,   # UTC
+    "trading_hours_end": 22,    # UTC
+    "min_confidence_for_claude": 58,
+    "cache_ttl_seconds": 300,   # 5 minutes
+    "cache_gold_threshold": 2.0,   # ±$2
+    "cache_confidence_threshold": 3,  # ±3%
 }
 
 # Dedicated alert logger for 529 errors → /var/log/goldml_alerts.log
@@ -89,6 +96,8 @@ class ClaudeDecisionEngine:
         # Dynamic prompt state
         self._prev_context = {}       # last sent context values (flat keys)
         self._stable_last_sent = {}   # timestamp of last inclusion for stable keys
+        # Cost optimization: cached Claude response
+        self._last_claude_cache = None  # {response, gold_price, confidence, direction, timestamp}
         self._init_client()
 
     def _init_client(self):
@@ -112,6 +121,61 @@ class ClaudeDecisionEngine:
     def is_enabled(self) -> bool:
         return self._enabled and self._client is not None
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # COST OPTIMIZATION RULES
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _is_trading_session(self) -> bool:
+        """RÈGLE 1 — Vérifie si on est en session de trading (Lun-Ven 07:00-22:00 UTC)."""
+        now = datetime.utcnow()
+        if now.weekday() > 4:  # Samedi=5, Dimanche=6
+            return False
+        return CLAUDE_CONFIG["trading_hours_start"] <= now.hour < CLAUDE_CONFIG["trading_hours_end"]
+
+    def _is_positive_signal(self, signal: dict) -> bool:
+        """RÈGLE 2 — Vérifie si le signal justifie un appel Claude."""
+        return (
+            signal.get("can_trade") is True
+            and signal.get("confidence", 0) >= CLAUDE_CONFIG["min_confidence_for_claude"]
+        )
+
+    def _is_cache_valid(self, signal: dict) -> bool:
+        """RÈGLE 3 — Vérifie si le cache Claude est encore exploitable."""
+        if not self._last_claude_cache:
+            return False
+        cache = self._last_claude_cache
+        elapsed = time.time() - cache["timestamp"]
+        if elapsed >= CLAUDE_CONFIG["cache_ttl_seconds"]:
+            return False
+        price_delta = abs(signal.get("gold_price", 0) - cache["gold_price"])
+        conf_delta = abs(signal.get("confidence", 0) - cache["confidence"])
+        dir_changed = signal.get("direction") != cache["direction"]
+        if price_delta >= CLAUDE_CONFIG["cache_gold_threshold"]:
+            return False
+        if conf_delta >= CLAUDE_CONFIG["cache_confidence_threshold"]:
+            return False
+        if dir_changed:
+            return False
+        return True
+
+    def _apply_cached_response(self, signal: dict) -> dict:
+        """Applique la dernière réponse Claude en cache au signal courant."""
+        cache = self._last_claude_cache
+        enriched = dict(signal)
+        adj = cache["claude_adj"]
+        original_conf = signal.get("confidence", 0)
+        new_conf = max(0, min(100, original_conf + adj))
+        enriched["confidence"] = new_conf
+        enriched["claude_confidence_adj"] = adj
+        enriched["claude_risk_flags"] = cache["risk_flags"]
+        enriched["claude_commentary"] = cache["commentary"]
+        enriched["claude_signal_quality"] = cache["signal_quality"]
+        enriched["claude_enriched"] = True
+        enriched["claude_cached"] = True
+        return enriched
+
+    # ═══════════════════════════════════════════════════════════════════════════
+
     def enrich_signal(self, signal: dict, context: dict = None) -> dict:
         """
         Enrichit un signal de trading avec l'analyse Claude.
@@ -126,6 +190,23 @@ class ClaudeDecisionEngine:
         """
         if not self.is_enabled:
             return signal
+
+        # ── RÈGLE 1 : Session de trading uniquement ──
+        if not self._is_trading_session():
+            logger.info("⏰ Claude skipped - hors session trading (UTC)")
+            if self._last_claude_cache:
+                return self._apply_cached_response(signal)
+            return signal
+
+        # ── RÈGLE 2 : Signal positif requis ──
+        if not self._is_positive_signal(signal):
+            logger.info("⏭️ Claude skipped - signal négatif (can_trade=False ou conf<58%)")
+            return signal
+
+        # ── RÈGLE 3 : Cache intelligent 5 minutes ──
+        if self._is_cache_valid(signal):
+            logger.info("♻️ Claude cached - contexte stable")
+            return self._apply_cached_response(signal)
 
         # Rate limiting + 529 backoff
         with self._lock:
@@ -291,7 +372,17 @@ class ClaudeDecisionEngine:
             f"💰 Tokens: in={input_tokens} out={output_tokens} | ~${cost_estimate:.4f} | prompt_chars={prompt_len}"
         )
 
-        raw_text = response.content[0].text
+        raw_text = response.content[0].text.strip()
+
+        # Claude sometimes wraps JSON in markdown code blocks (```json ... ```)
+        if raw_text.startswith("```"):
+            # Remove opening ```json or ``` line and closing ```
+            lines = raw_text.split("\n")
+            lines = lines[1:]  # drop opening ```json
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_text = "\n".join(lines).strip()
+
         claude_result = json.loads(raw_text)
 
         # Validation des bornes
@@ -310,6 +401,18 @@ class ClaudeDecisionEngine:
         enriched["claude_signal_quality"] = claude_result.get("signal_quality", "MODERATE")
         enriched["claude_enriched"] = True
 
+        # Update cost optimization cache
+        self._last_claude_cache = {
+            "timestamp": time.time(),
+            "gold_price": signal.get("gold_price", 0),
+            "confidence": signal.get("confidence", 0),
+            "direction": signal.get("direction"),
+            "claude_adj": adj,
+            "risk_flags": enriched["claude_risk_flags"],
+            "commentary": enriched["claude_commentary"],
+            "signal_quality": enriched["claude_signal_quality"],
+        }
+
         logger.info(
             f"🧠 Claude: conf {original_conf}→{new_conf} ({adj:+d}) | "
             f"quality={enriched['claude_signal_quality']} | "
@@ -322,6 +425,7 @@ class ClaudeDecisionEngine:
         """Status de santé du moteur Claude."""
         now = time.time()
         backoff_remaining = max(0, int(self._backoff_until - now)) if self._backoff_until else 0
+        cache_age = round(now - self._last_claude_cache["timestamp"], 1) if self._last_claude_cache else None
         return {
             "enabled": self._enabled,
             "client_ready": self._client is not None,
@@ -332,6 +436,11 @@ class ClaudeDecisionEngine:
             "dynamic_prompt": {
                 "cached_fields": len(self._prev_context),
                 "stable_sections_cached": list(self._stable_last_sent.keys()),
+            },
+            "cost_optimization": {
+                "trading_session": self._is_trading_session(),
+                "cache_age_s": cache_age,
+                "cache_active": self._last_claude_cache is not None,
             },
         }
 
