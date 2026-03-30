@@ -17,7 +17,7 @@ import json
 import time
 import logging
 from threading import Lock
-from datetime import datetime
+from datetime import datetime, timezone
 from copy import deepcopy
 
 logger = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ class ClaudeDecisionEngine:
 
     def _is_trading_session(self) -> bool:
         """RÈGLE 1 — Vérifie si on est en session de trading (Lun-Ven 07:00-22:00 UTC)."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if now.weekday() > 4:  # Samedi=5, Dimanche=6
             return False
         return CLAUDE_CONFIG["trading_hours_start"] <= now.hour < CLAUDE_CONFIG["trading_hours_end"]
