@@ -428,7 +428,15 @@ class ClaudeDecisionEngine:
         if not response.content or not hasattr(response.content[0], 'text'):
             raise ValueError(f"Unexpected response format: stop_reason={response.stop_reason}")
 
-        claude_result = self._extract_json(response.content[0].text)
+        raw_text = response.content[0].text
+        try:
+            claude_result = self._extract_json(raw_text)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.debug(
+                "RAW CLAUDE RESPONSE (parse failed):\n---\n%s\n---",
+                raw_text,
+            )
+            raise ValueError(f"JSON parse error: {e}") from e
 
         # Validation des bornes
         adj = claude_result.get("confidence_adjustment", 0)
