@@ -332,6 +332,51 @@ class ClaudeDecisionEngine:
 
         return filtered
 
+    @staticmethod
+    def _extract_json(raw_text: str) -> dict:
+        """
+        Extract first valid JSON object from Claude's response,
+        regardless of surrounding text, code blocks, or formatting.
+        Covers: pure JSON, ```json blocks, preamble text, trailing text.
+        """
+        text = raw_text.strip()
+
+        # Fast path — direct parse (~88% of responses)
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Find first '{' and extract balanced JSON object
+        start = text.find('{')
+        if start == -1:
+            raise ValueError(f"No JSON object found in response: {text[:200]}")
+
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if escape:
+                escape = False
+                continue
+            if c == '\\' and in_string:
+                escape = True
+                continue
+            if c == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return json.loads(text[start:i + 1])
+
+        raise ValueError(f"Unbalanced JSON in response: {text[:200]}")
+
     def _call_claude(self, signal: dict, context: dict) -> dict:
         """Appel effectif à l'API Claude avec prompt dynamique optimisé."""
         # Signal fields — always included (volatile)
@@ -372,18 +417,11 @@ class ClaudeDecisionEngine:
             f"💰 Tokens: in={input_tokens} out={output_tokens} | ~${cost_estimate:.4f} | prompt_chars={prompt_len}"
         )
 
-        raw_text = response.content[0].text.strip()
+        # Guard: ensure response contains a text block
+        if not response.content or not hasattr(response.content[0], 'text'):
+            raise ValueError(f"Unexpected response format: stop_reason={response.stop_reason}")
 
-        # Claude sometimes wraps JSON in markdown code blocks (```json ... ```)
-        if raw_text.startswith("```"):
-            # Remove opening ```json or ``` line and closing ```
-            lines = raw_text.split("\n")
-            lines = lines[1:]  # drop opening ```json
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            raw_text = "\n".join(lines).strip()
-
-        claude_result = json.loads(raw_text)
+        claude_result = self._extract_json(response.content[0].text)
 
         # Validation des bornes
         adj = claude_result.get("confidence_adjustment", 0)
