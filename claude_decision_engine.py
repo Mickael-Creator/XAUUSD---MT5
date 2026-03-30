@@ -13,6 +13,7 @@ Architecture :
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -347,6 +348,12 @@ class ClaudeDecisionEngine:
         Covers: pure JSON, ```json blocks, preamble text, trailing text.
         """
         text = raw_text.strip()
+
+        # Strip markdown code fences (```json ... ``` or ``` ... ```)
+        text = re.sub(r'```(?:json)?\s*', '', text).strip()
+
+        # Fix +N numeric literals (invalid JSON) → N
+        text = re.sub(r':\s*\+(\d)', r': \1', text)
 
         # Fast path — direct parse (~88% of responses)
         try:
