@@ -17,15 +17,19 @@ import time
 import hmac
 import hashlib
 import logging
+import logging.handlers
 import sqlite3
 import threading
 import requests
 import feedparser
 from datetime import datetime, timedelta
-from flask import Flask, jsonify
+import pandas as pd
+from flask import Flask, jsonify, request, send_file
 from threading import Lock, Event
 from news_fetcher_v2 import fetch_forex_factory_news as fetch_news_v2
 from news_trading_signal import NewsTradingAnalyzer, create_news_trading_endpoint
+from claude_decision_engine import claude_engine
+from python_sniper import python_sniper
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -38,7 +42,7 @@ logging.basicConfig(
     format='%(asctime)s,%(msecs)03d - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
-        logging.FileHandler('/root/gold_ml_phase4/logs/gold_intelligence.log'),
+        logging.handlers.WatchedFileHandler('/root/gold_ml_phase4/logs/gold_intelligence.log'),
         logging.StreamHandler()
     ]
 )
@@ -56,15 +60,16 @@ CONFIG = {
     # TTL en secondes par source de données
     "ttl": {
         "gold_price":  30,    # Prix spot : 30s
-        "dxy":         60,    # DXY : 1 min
-        "vix":         120,   # VIX : 2 min
-        "macro":       300,   # US10Y / real_rate : 5 min
+        "macro":       300,   # US10Y / real_rate / DXY / VIX : 5 min
         "cot":         3600,  # COT : 1h (données hebdomadaires)
         "news":        120,   # News FF : 2 min
         "sentiment":   300,   # Fear & Greed : 5 min
         "geopolitics": 600,   # Géopolitique RSS : 10 min
         "signal":      30,    # Signal final calculé : 30s
     },
+    # Marge pour le health check : TTL + grace → évite les faux DEGRADED
+    # pendant le cycle de refresh séquentiel (sleep 10s + fetches ~5-10s)
+    "health_grace_s": 20,
 
     # Valeurs de fallback institutionnelles (dernières valeurs connues fiables)
     "fallback": {
@@ -146,8 +151,11 @@ class InstitutionalCache:
         3. Fallback hardcodé
         """
         with self._lock:
-            if key in self._data and self._data[key]:
-                return self._data[key]
+            if key in self._data:
+                val = self._data[key]
+                # DataFrames / non-dict values: truthiness check would raise
+                if val is not None and not (isinstance(val, dict) and not val):
+                    return val
             return CONFIG["fallback"].get(key, {})
 
     def is_fresh(self, key: str) -> bool:
@@ -162,8 +170,10 @@ class InstitutionalCache:
                 return 999999
             return int(time.time() - ts)
 
-    def status(self) -> dict:
-        """Retourne l'état de fraîcheur de toutes les clés — pour monitoring"""
+    def status(self, grace: int = 0) -> dict:
+        """Retourne l'état de fraîcheur de toutes les clés — pour monitoring.
+        grace: secondes supplémentaires tolérées avant de marquer stale.
+        """
         with self._lock:
             now = time.time()
             result = {}
@@ -174,7 +184,7 @@ class InstitutionalCache:
                 result[key] = {
                     "age_s":    age,
                     "ttl_s":    ttl,
-                    "fresh":    (now - ts) < ttl,
+                    "fresh":    (now - ts) < (ttl + grace),
                     "has_data": key in self._data and bool(self._data[key])
                 }
             return result
@@ -576,6 +586,60 @@ def _background_refresh_loop():
                     geo=cache.get_best("geopolitics"),
                     gold_price=cache.get_best("gold_price"),
                 )
+
+                # === CLAUDE AI ENRICHMENT ===
+                if claude_engine.is_enabled:
+                    signal = claude_engine.enrich_signal(signal, context={
+                        "macro": cache.get_best("macro"),
+                        "cot": cache.get_best("cot"),
+                        "sentiment": cache.get_best("sentiment"),
+                        "geopolitics": cache.get_best("geopolitics"),
+                    })
+
+                # === PYTHON SNIPER ICT ANALYSIS ===
+                # Use get_best (stale OK) with a 30-min guard — candle data ages gracefully
+                df_m15 = cache.get_best("market_data_m15") if cache.age_seconds("market_data_m15") < 1800 else None
+                df_m5 = cache.get_best("market_data_m5") if cache.age_seconds("market_data_m5") < 1800 else None
+                if signal.get("can_trade") and df_m15 is not None and df_m5 is not None:
+                    try:
+                        sniper = python_sniper.analyze_entry(
+                            direction=signal["direction"],
+                            df_m15=df_m15,
+                            df_m5=df_m5,
+                            current_price=signal.get("gold_price", 0),
+                            spread_pips=2.0,
+                        )
+                        signal["sniper_valid"] = sniper.valid
+                        signal["sniper_score"] = sniper.score
+                        signal["sniper_sl"] = sniper.sl
+                        signal["sniper_tp"] = sniper.tp
+                        signal["sniper_reason"] = sniper.reason
+                        if not sniper.valid:
+                            signal["can_trade"] = False
+                        logger.info(
+                            f"🎯 Sniper: valid={sniper.valid} | score={sniper.score} | "
+                            f"sl={sniper.sl} tp={sniper.tp} | {sniper.reason}"
+                        )
+                    except Exception as e:
+                        logger.error(f"❌ Sniper analysis failed: {e}")
+                        signal.setdefault("sniper_valid", False)
+                        signal.setdefault("sniper_score", 0)
+                        signal.setdefault("sniper_sl", 0.0)
+                        signal.setdefault("sniper_tp", 0.0)
+                        signal.setdefault("sniper_reason", f"Sniper error: {e}")
+                else:
+                    reason = "no_market_data" if (df_m15 is None or df_m5 is None) else "can_trade=false"
+                    signal.setdefault("sniper_valid", False)
+                    signal.setdefault("sniper_score", 0)
+                    signal.setdefault("sniper_sl", 0.0)
+                    signal.setdefault("sniper_tp", 0.0)
+                    signal.setdefault("sniper_reason", reason)
+                    if df_m15 is None or df_m5 is None:
+                        logger.warning(
+                            f"⚠️ Sniper skipped: M15 age={cache.age_seconds('market_data_m15')}s "
+                            f"M5 age={cache.age_seconds('market_data_m5')}s"
+                        )
+
                 cache.set("signal", signal)
                 logger.info(
                     f"🎯 Signal: {signal['direction']} | "
@@ -672,18 +736,53 @@ def news_trading_signal_quick_v1():
     return jsonify(signal), 200
 
 
+@app.route('/v1/market_data', methods=['POST'])
+@_require_auth
+def market_data_v1():
+    """
+    Reçoit les bougies M15/M5 depuis l'EA MT5.
+    Stocke en cache sous forme de DataFrame pandas.
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    result = {}
+    for tf in ("m15", "m5"):
+        bars = data.get(tf, [])
+        if bars:
+            df = pd.DataFrame(bars, columns=["t", "o", "h", "l", "c", "v"])
+            cache.set(f"market_data_{tf}", df)
+        result[f"bars_{tf}"] = len(bars)
+
+    logger.info(f"📊 Market data: M15={result['bars_m15']} bars M5={result['bars_m5']} bars")
+
+    return jsonify({"status": "ok", **result}), 200
+
+
 @app.route('/v1/health', methods=['GET'])
 def health_v1():
     """
     Health check versionné — non authentifié, pour les monitors externes.
     Retourne l'état du cache et le statut global du service.
     """
-    status = cache.status()
+    grace = CONFIG["health_grace_s"]
+    status = cache.status(grace=grace)
     all_fresh = all(v["fresh"] for v in status.values())
+
+    # Market data — optionnel (pas encore envoyé par l'EA au démarrage)
+    market = {}
+    for tf in ("m15", "m5"):
+        key = f"market_data_{tf}"
+        age = cache.age_seconds(key)
+        has = age < 999999
+        market[key] = {"age_s": age, "has_data": has, "fresh": has and age < 60}
+
     return jsonify({
         "status":       "healthy" if all_fresh else "degraded",
         "warmup_done":  _warmup_done.is_set(),
         "signal_age_s": cache.age_seconds("signal"),
+        "market_data":  market,
         "timestamp":    datetime.utcnow().isoformat() + "Z",
     }), 200
 
@@ -743,7 +842,8 @@ def get_quick_intelligence():
 @app.route('/gold_intelligence/health', methods=['GET'])
 def health_check():
     """Health check avec état détaillé du cache"""
-    status = cache.status()
+    grace = CONFIG["health_grace_s"]
+    status = cache.status(grace=grace)
     all_fresh = all(v["fresh"] for v in status.values())
     signal = cache.get_best("signal")
 
@@ -785,6 +885,26 @@ def get_full_intelligence() -> dict:
         "geopolitical": cache.get_best("geopolitics"),
         "fear_greed":  fear_greed,
     }
+
+
+@app.route('/tmp/ea_download', methods=['GET'])
+def ea_download():
+    """Téléchargement du fichier EA MT5 compilé avec les modifications sniper."""
+    ea_path = "/tmp/Gold_News_Institutional_EA_FINAL.mq5"
+    if not os.path.exists(ea_path):
+        return jsonify({"error": "EA file not found"}), 404
+    return send_file(ea_path, as_attachment=True,
+                     download_name="Gold_News_Institutional_EA_FINAL.mq5")
+
+
+@app.route('/tmp/bridge_download', methods=['GET'])
+def bridge_download():
+    """Téléchargement du fichier GoldML_DataBridge.mqh."""
+    path = "/tmp/GoldML_DataBridge_FINAL.mqh"
+    if not os.path.exists(path):
+        return jsonify({"error": "file not found"}), 404
+    return send_file(path, as_attachment=True,
+                     download_name="GoldML_DataBridge.mqh")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

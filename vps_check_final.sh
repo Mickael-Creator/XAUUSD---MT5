@@ -265,6 +265,64 @@ if [[ -n "$LAST_LOGROTATE" ]]; then
     ok "Dernier logrotate status: $LAST_LOGROTATE"
 fi
 
+# ── 10. COT DATA ─────────────────────────────────────────────────────────────
+echo ""
+echo "════════════════════════════════════════════════════════"
+echo "  10. COT DATA"
+echo "════════════════════════════════════════════════════════"
+
+COT_DB="/root/gold_ml_phase4/gold_ml_database.db"
+if [[ -f "$COT_DB" ]]; then
+    COT_ROW=$(sqlite3 "$COT_DB" "SELECT report_date, net_position, net_change, long_positions, short_positions, total_oi FROM cot_data ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    if [[ -n "$COT_ROW" ]]; then
+        IFS='|' read -r COT_DATE COT_NET COT_NCHANGE COT_LONG COT_SHORT COT_OI <<< "$COT_ROW"
+
+        # Sentiment
+        if [[ "$COT_NET" -gt 0 ]]; then
+            COT_SENTIMENT="BULLISH"
+        elif [[ "$COT_NET" -lt 0 ]]; then
+            COT_SENTIMENT="BEARISH"
+        else
+            COT_SENTIMENT="NEUTRAL"
+        fi
+
+        # Long %
+        if [[ "$COT_OI" -gt 0 ]]; then
+            COT_LONG_PCT=$(python3 -c "print(f'{${COT_LONG}/${COT_OI}*100:.1f}')" 2>/dev/null || echo "N/A")
+        else
+            COT_LONG_PCT="N/A"
+        fi
+
+        # Percentile net (rank among all historical net_position values)
+        COT_PERCENTILE=$(sqlite3 "$COT_DB" "SELECT printf('%.1f', 100.0 * SUM(CASE WHEN net_position <= $COT_NET THEN 1 ELSE 0 END) / COUNT(*)) FROM cot_data;" 2>/dev/null || echo "N/A")
+
+        ok "Report date  : $COT_DATE"
+        echo -e "  🧭 ${YELLOW}Sentiment${NC}    : $COT_SENTIMENT (net=$COT_NET)"
+        echo -e "  📈 ${YELLOW}Long %${NC}       : ${COT_LONG_PCT}%"
+        echo -e "  📊 ${YELLOW}Percentile${NC}   : ${COT_PERCENTILE}%"
+        echo -e "  🔄 ${YELLOW}Net Change${NC}   : $COT_NCHANGE"
+
+        # Warning si report_date > 14 jours
+        if [[ -n "$COT_DATE" ]]; then
+            COT_EPOCH=$(date -d "$COT_DATE" +%s 2>/dev/null || echo "0")
+            NOW_EPOCH=$(date +%s)
+            COT_AGE_DAYS=$(( (NOW_EPOCH - COT_EPOCH) / 86400 ))
+            if [[ "$COT_AGE_DAYS" -gt 14 ]]; then
+                warn "COT report is ${COT_AGE_DAYS} days old (> 14 days) — data may be stale"
+                WARNINGS=$((WARNINGS + 1))
+            else
+                ok "COT report age: ${COT_AGE_DAYS} days (fresh)"
+            fi
+        fi
+    else
+        fail "No COT data found in database"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    fail "COT database not found: $COT_DB"
+    ERRORS=$((ERRORS + 1))
+fi
+
 # ── Résumé ────────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════════════"
