@@ -9,7 +9,7 @@ import sqlite3
 import requests
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from logging.handlers import RotatingFileHandler
 import schedule
@@ -22,7 +22,7 @@ import yfinance as yf
 # ============================================================================
 app = Flask(__name__)
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 @app.route("/news_trading_signal/quick", methods=["GET"])
 def news_trading_signal_quick():
@@ -34,7 +34,7 @@ def news_trading_signal_quick():
         "service": "gold_ml_monitor",
         "module": "news_trading_signal",
         "status": "available",
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
     }), 200
 
 # Paths
@@ -612,13 +612,13 @@ def get_server_time():
     """Return server time with timezone info for MT5 sync"""
     try:
         # UTC time
-        utc_now = datetime.utcnow()
+        utc_now = datetime.now(timezone.utc)
         
         # Server local time (VPS)
         local_now = datetime.now()
         
         # Calculate offset between server and UTC
-        offset_seconds = (local_now - utc_now).total_seconds()
+        offset_seconds = (local_now - utc_now.replace(tzinfo=None)).total_seconds()
         server_offset_hours = int(offset_seconds / 3600)
         
         # Broker offset (configurable - default +2 for most EU brokers)

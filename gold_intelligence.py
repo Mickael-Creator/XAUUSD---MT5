@@ -22,7 +22,7 @@ import sqlite3
 import threading
 import requests
 import feedparser
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 from flask import Flask, jsonify, request, send_file
 from threading import Lock, Event
@@ -372,8 +372,8 @@ def _fetch_cot() -> dict:
             report_date = data.get("report_date", "")
             if report_date:
                 try:
-                    rd = datetime.strptime(report_date[:10], "%Y-%m-%d")
-                    days_old = (datetime.utcnow() - rd).days
+                    rd = datetime.strptime(report_date[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    days_old = (datetime.now(timezone.utc) - rd).days
                     if days_old > 14:
                         logger.warning(
                             f"⚠️ COT data is {days_old} days old (report_date={report_date}). "
@@ -506,7 +506,7 @@ def _calculate_signal(macro: dict, cot: dict, news: dict,
             "timing_mode":      signal.timing_mode.value,
             "gold_price":       gold_price.get("price"),
             "gold_source":      gold_price.get("source"),
-            "timestamp":        datetime.utcnow().isoformat() + "Z",
+            "timestamp":        datetime.now(timezone.utc).isoformat() + "Z",
             "error":            None,
         }
 
@@ -516,7 +516,7 @@ def _calculate_signal(macro: dict, cot: dict, news: dict,
         return {
             **CONFIG["fallback"]["signal"],
             "gold_price": gold_price.get("price", 4390.0),
-            "timestamp":  datetime.utcnow().isoformat() + "Z",
+            "timestamp":  datetime.now(timezone.utc).isoformat() + "Z",
             "error":      str(e),
         }
 
@@ -783,7 +783,7 @@ def health_v1():
         "warmup_done":  _warmup_done.is_set(),
         "signal_age_s": cache.age_seconds("signal"),
         "market_data":  market,
-        "timestamp":    datetime.utcnow().isoformat() + "Z",
+        "timestamp":    datetime.now(timezone.utc).isoformat() + "Z",
     }), 200
 
 
@@ -812,7 +812,7 @@ def news_trading_signal():
 def get_gold_intelligence():
     """Rapport d'intelligence complet"""
     return jsonify({
-        "timestamp":   datetime.utcnow().isoformat() + "Z",
+        "timestamp":   datetime.now(timezone.utc).isoformat() + "Z",
         "gold_price":  cache.get_best("gold_price"),
         "macro":       cache.get_best("macro"),
         "cot":         cache.get_best("cot"),
@@ -829,7 +829,7 @@ def get_quick_intelligence():
     """Version légère pour monitoring rapide"""
     signal = cache.get_best("signal")
     return jsonify({
-        "timestamp":   datetime.utcnow().isoformat() + "Z",
+        "timestamp":   datetime.now(timezone.utc).isoformat() + "Z",
         "gold_bias":   signal.get("bias", "NEUTRAL"),
         "confidence":  signal.get("confidence", 0),
         "timing_mode": signal.get("timing_mode", "CLEAR"),
@@ -854,7 +854,7 @@ def health_check():
         "gold_price":    cache.get_best("gold_price"),
         "last_signal":   signal.get("direction"),
         "warmup_done":   _warmup_done.is_set(),
-        "timestamp":     datetime.utcnow().isoformat() + "Z",
+        "timestamp":     datetime.now(timezone.utc).isoformat() + "Z",
     }), 200
 
 

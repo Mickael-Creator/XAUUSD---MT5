@@ -7,7 +7,7 @@ Strategy: Trade the REACTION, not the news itself
 - Post-news: Fade the spike if surprise contradicts positioning
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -677,7 +677,7 @@ class NewsTradingAnalyzer:
                 'tp_mode': signal.take_profit_mode
             },
             'reasoning': signal.reasoning,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }
 
 
