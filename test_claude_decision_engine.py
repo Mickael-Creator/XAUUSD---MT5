@@ -61,6 +61,7 @@ class TestClaudeDecisionEngine(unittest.TestCase):
         engine._backoff_until = 0
         engine._prev_context = {}
         engine._stable_last_sent = {}
+        engine._last_claude_cache = None
 
         # Mock du client Anthropic
         mock_client = MagicMock()
@@ -139,7 +140,8 @@ class TestClaudeDecisionEngine(unittest.TestCase):
         result1 = engine.enrich_signal(SAMPLE_SIGNAL, SAMPLE_CONTEXT)
         self.assertTrue(result1.get("claude_enriched"))
 
-        # Deuxième appel immédiat — rate limited, signal non enrichi
+        # Deuxième appel immédiat — invalidate cache to isolate rate limiting
+        engine._last_claude_cache = None
         result2 = engine.enrich_signal(SAMPLE_SIGNAL, SAMPLE_CONTEXT)
         self.assertNotIn("claude_enriched", result2)
 
@@ -197,6 +199,7 @@ class TestClaudeDecisionEngine(unittest.TestCase):
 
         # Second call with tiny DXY change (0.1 < threshold 0.5)
         engine._last_call_time = 0
+        engine._last_claude_cache = None  # bypass cache to test dynamic prompt
         ctx2 = {
             "macro": {"us10y": 4.18, "real_rate": 1.75, "dxy": 95.9, "vix": 14.2},
             "cot": SAMPLE_CONTEXT["cot"],
@@ -205,14 +208,15 @@ class TestClaudeDecisionEngine(unittest.TestCase):
         }
         engine.enrich_signal(SAMPLE_SIGNAL, ctx2)
 
-        # Verify the API was called with compact payload
+        # All changes are below threshold AND stable sections throttled
+        # → filtered is empty → fallback sends full context to avoid blind judgement
         call_args = engine._client.messages.create.call_args
         user_msg = call_args.kwargs["messages"][0]["content"]
         payload = json.loads(user_msg)
 
-        # DXY should NOT be in macro (change 0.1 < threshold 0.5)
-        if "macro" in payload.get("x", {}):
-            self.assertNotIn("dxy", payload["x"]["macro"])
+        # Full context fallback: all sections present
+        self.assertIn("x", payload)
+        self.assertIn("macro", payload["x"])
 
     def test_dynamic_prompt_includes_significant_change(self):
         """Semi-stable fields above threshold ARE included."""
@@ -221,6 +225,7 @@ class TestClaudeDecisionEngine(unittest.TestCase):
         engine.enrich_signal(SAMPLE_SIGNAL, SAMPLE_CONTEXT)
 
         engine._last_call_time = 0
+        engine._last_claude_cache = None  # bypass cache to test dynamic prompt
         ctx2 = {
             "macro": {"us10y": 4.18, "real_rate": 1.75, "dxy": 97.0, "vix": 14.2},
             "cot": SAMPLE_CONTEXT["cot"],
@@ -248,10 +253,15 @@ class TestClaudeDecisionEngine(unittest.TestCase):
         self.assertIn("cot", payload.get("x", {}))
 
         # Second call immediately — COT/geo should be omitted (unchanged + within interval)
+        # Use a significant DXY change so filtered is non-empty (isolates stable throttling)
         engine._last_call_time = 0
-        engine.enrich_signal(SAMPLE_SIGNAL, SAMPLE_CONTEXT)
+        engine._last_claude_cache = None  # bypass cache to test dynamic prompt
+        ctx2 = dict(SAMPLE_CONTEXT, macro={"us10y": 4.18, "real_rate": 1.75, "dxy": 97.0, "vix": 14.2})
+        engine.enrich_signal(SAMPLE_SIGNAL, ctx2)
         call_args = engine._client.messages.create.call_args
         payload = json.loads(call_args.kwargs["messages"][0]["content"])
+        # DXY changed significantly → macro is in filtered, but COT/geo unchanged → omitted
+        self.assertIn("macro", payload.get("x", {}))
         self.assertNotIn("cot", payload.get("x", {}))
         self.assertNotIn("geopolitics", payload.get("x", {}))
 

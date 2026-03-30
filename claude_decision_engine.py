@@ -330,6 +330,13 @@ class ClaudeDecisionEngine:
         if included_tokens_saved > 0:
             logger.debug(f"📉 Dynamic prompt: {included_tokens_saved} semi-stable fields omitted (unchanged)")
 
+        # Fallback: if filtering removed everything, send the full context
+        # so Claude always has macro/COT/sentiment data to reason about
+        # (Claude has no memory between calls — an empty payload causes blind judgement)
+        if not filtered and context:
+            logger.info("📎 Dynamic prompt: no significant changes detected — sending full context to avoid blind judgement")
+            return {k: v for k, v in context.items() if v}
+
         return filtered
 
     @staticmethod
