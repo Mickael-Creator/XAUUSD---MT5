@@ -432,7 +432,7 @@ class ClaudeDecisionEngine:
         try:
             claude_result = self._extract_json(raw_text)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.debug(
+            logger.warning(
                 "RAW CLAUDE RESPONSE (parse failed):\n---\n%s\n---",
                 raw_text,
             )
