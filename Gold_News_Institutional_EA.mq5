@@ -107,7 +107,7 @@ input double FTMO_Daily_DD_Limit = 4.5;    // % - arrÃªt Ã  4.5% (avant 5%)
 //+------------------------------------------------------------------+
 input group "â•â•â• SESSION â•â•â•"
 input bool   Enable_Session_Filter = true;
-input string Session_Start = "08:00";
+input string Session_Start = "00:00";
 input string Session_End = "20:00";
 
 //+------------------------------------------------------------------+

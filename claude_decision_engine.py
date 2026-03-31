@@ -35,7 +35,7 @@ CLAUDE_CONFIG = {
     "temperature": 0.2,
     "backoff_529": [60, 120, 300],  # Exponential backoff on 529 Overloaded
     # Cost optimization
-    "trading_hours_start": 7,   # UTC
+    "trading_hours_start": 0,   # UTC
     "trading_hours_end": 22,    # UTC
     "min_confidence_for_claude": 58,
     "cache_ttl_seconds": 300,   # 5 minutes
