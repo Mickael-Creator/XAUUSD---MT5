@@ -37,7 +37,7 @@ CLAUDE_CONFIG = {
     # Cost optimization
     "trading_hours_start": 0,   # UTC
     "trading_hours_end": 22,    # UTC
-    "min_confidence_for_claude": 58,
+    "min_confidence_for_claude": 60,
     "cache_ttl_seconds": 300,   # 5 minutes
     "cache_gold_threshold": 2.0,   # ±$2
     "cache_confidence_threshold": 3,  # ±3%
