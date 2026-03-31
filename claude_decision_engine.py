@@ -54,10 +54,11 @@ if not _alert_logger.handlers:
     except Exception:
         pass  # Alert log not writable — non-blocking
 
-SYSTEM_PROMPT = """Analyste quant XAUUSD. Signal brut + données macro/COT/sentiment/géo.
-Rôle: 1)Cohérence signal↔macro 2)Risques cachés 3)Ajuster confiance(-20 à +20) 4)Commentaire court.
-Les données contextuelles sont envoyées de façon incrémentale: seules les valeurs ayant changé significativement sont incluses. Les champs absents n'ont pas changé depuis le dernier appel.
-JSON uniquement:{"confidence_adjustment":<int>,"risk_flags":[<max 3>],"claude_commentary":"<max 150c>","signal_quality":"<STRONG|MODERATE|WEAK>"}"""
+SYSTEM_PROMPT = """Analyste quant XAUUSD + ICT sniper. Signal brut + macro/COT/sentiment/géo + bougies M15/M5.
+Rôle: 1)Cohérence signal↔macro 2)Risques cachés 3)Ajuster confiance(-20 à +20) 4)Analyse ICT sur M15/M5.
+ICT: Sur M15 chercher sweep de liquidité (prise de high/low) + BOS (break of structure). Sur M5 chercher PD array mitigé (OB=order block ou FVG=fair value gap) dans la zone de pullback. Si bougies absentes, mettre ict_score=0 et sniper_valid=false.
+Contexte incrémental: seules les valeurs ayant changé significativement sont incluses. Champs absents=inchangés.
+JSON uniquement:{"confidence_adjustment":<int>,"risk_flags":[<max 3>],"claude_commentary":"<max 150c>","signal_quality":"<STRONG|MODERATE|WEAK>","sniper_valid":<bool>,"ict_score":<0-100>,"ict_sl":<float|0>,"ict_tp":<float|0>,"ict_reason":"<max 80c>"}"""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DYNAMIC PROMPT — Threshold-based context filtering
@@ -173,6 +174,11 @@ class ClaudeDecisionEngine:
         enriched["claude_signal_quality"] = cache["signal_quality"]
         enriched["claude_enriched"] = True
         enriched["claude_cached"] = True
+        enriched["sniper_claude_valid"] = cache.get("sniper_claude_valid", False)
+        enriched["ict_score"] = cache.get("ict_score", 0)
+        enriched["ict_sl"] = cache.get("ict_sl", 0.0)
+        enriched["ict_tp"] = cache.get("ict_tp", 0.0)
+        enriched["ict_reason"] = cache.get("ict_reason", "")
         return enriched
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -391,6 +397,18 @@ class ClaudeDecisionEngine:
 
         raise ValueError(f"Unbalanced JSON in response: {text[:200]}")
 
+    @staticmethod
+    def _serialize_candles(df, max_bars: int = 30) -> list[list]:
+        """Serialize a candle DataFrame to compact OHLC list (last N bars, oldest first)."""
+        if df is None or not hasattr(df, 'iloc'):
+            return []
+        df_tail = df.tail(max_bars)
+        # Format: [[o, h, l, c], ...] — rounded to 1 decimal to save tokens
+        return [
+            [round(r.o, 1), round(r.h, 1), round(r.l, 1), round(r.c, 1)]
+            for r in df_tail.itertuples()
+        ]
+
     def _call_claude(self, signal: dict, context: dict) -> dict:
         """Appel effectif à l'API Claude avec prompt dynamique optimisé."""
         # Signal fields — always included (volatile)
@@ -403,12 +421,26 @@ class ClaudeDecisionEngine:
             "p": signal.get("gold_price"),
         }
 
-        # Context — dynamically filtered
+        # Extract candle DataFrames before dynamic filtering (not dict-iterable)
+        candles_m15 = context.pop("candles_m15", None)
+        candles_m5 = context.pop("candles_m5", None)
+
+        # Context — dynamically filtered (macro, cot, sentiment, geopolitics)
         ctx = self._build_dynamic_context(context)
 
         payload = {"s": sig}
         if ctx:
             payload["x"] = ctx
+
+        # Candles — compact OHLC arrays for ICT analysis
+        m15_data = self._serialize_candles(candles_m15)
+        m5_data = self._serialize_candles(candles_m5)
+        if m15_data or m5_data:
+            payload["candles"] = {}
+            if m15_data:
+                payload["candles"]["m15"] = m15_data
+            if m5_data:
+                payload["candles"]["m5"] = m5_data
 
         user_message = json.dumps(payload, separators=(",", ":"))
 
@@ -461,6 +493,13 @@ class ClaudeDecisionEngine:
         enriched["claude_signal_quality"] = claude_result.get("signal_quality", "MODERATE")
         enriched["claude_enriched"] = True
 
+        # ICT sniper fields from Claude
+        enriched["sniper_claude_valid"] = bool(claude_result.get("sniper_valid", False))
+        enriched["ict_score"] = max(0, min(100, int(claude_result.get("ict_score", 0))))
+        enriched["ict_sl"] = float(claude_result.get("ict_sl", 0))
+        enriched["ict_tp"] = float(claude_result.get("ict_tp", 0))
+        enriched["ict_reason"] = str(claude_result.get("ict_reason", ""))[:80]
+
         # Update cost optimization cache
         self._last_claude_cache = {
             "timestamp": time.time(),
@@ -471,11 +510,17 @@ class ClaudeDecisionEngine:
             "risk_flags": enriched["claude_risk_flags"],
             "commentary": enriched["claude_commentary"],
             "signal_quality": enriched["claude_signal_quality"],
+            "sniper_claude_valid": enriched["sniper_claude_valid"],
+            "ict_score": enriched["ict_score"],
+            "ict_sl": enriched["ict_sl"],
+            "ict_tp": enriched["ict_tp"],
+            "ict_reason": enriched["ict_reason"],
         }
 
         logger.info(
             f"🧠 Claude: conf {original_conf}→{new_conf} ({adj:+d}) | "
             f"quality={enriched['claude_signal_quality']} | "
+            f"ict={enriched['ict_score']} sniper={enriched['sniper_claude_valid']} | "
             f"flags={enriched['claude_risk_flags']}"
         )
 

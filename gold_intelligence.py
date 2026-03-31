@@ -587,19 +587,22 @@ def _background_refresh_loop():
                     gold_price=cache.get_best("gold_price"),
                 )
 
-                # === CLAUDE AI ENRICHMENT ===
+                # === MARKET DATA (needed by both Claude ICT and Python Sniper) ===
+                df_m15 = cache.get_best("market_data_m15") if cache.age_seconds("market_data_m15") < 1800 else None
+                df_m5 = cache.get_best("market_data_m5") if cache.age_seconds("market_data_m5") < 1800 else None
+
+                # === CLAUDE AI ENRICHMENT (+ ICT analysis) ===
                 if claude_engine.is_enabled:
                     signal = claude_engine.enrich_signal(signal, context={
                         "macro": cache.get_best("macro"),
                         "cot": cache.get_best("cot"),
                         "sentiment": cache.get_best("sentiment"),
                         "geopolitics": cache.get_best("geopolitics"),
+                        "candles_m15": df_m15,
+                        "candles_m5": df_m5,
                     })
 
-                # === PYTHON SNIPER ICT ANALYSIS ===
-                # Use get_best (stale OK) with a 30-min guard — candle data ages gracefully
-                df_m15 = cache.get_best("market_data_m15") if cache.age_seconds("market_data_m15") < 1800 else None
-                df_m5 = cache.get_best("market_data_m5") if cache.age_seconds("market_data_m5") < 1800 else None
+                # === PYTHON SNIPER ICT ANALYSIS (consultatif — ne bloque plus can_trade) ===
                 if signal.get("can_trade") and df_m15 is not None and df_m5 is not None:
                     try:
                         sniper = python_sniper.analyze_entry(
@@ -609,36 +612,66 @@ def _background_refresh_loop():
                             current_price=signal.get("gold_price", 0),
                             spread_pips=2.0,
                         )
-                        signal["sniper_valid"] = sniper.valid
-                        signal["sniper_score"] = sniper.score
-                        signal["sniper_sl"] = sniper.sl
-                        signal["sniper_tp"] = sniper.tp
-                        signal["sniper_reason"] = sniper.reason
-                        if not sniper.valid:
-                            signal["can_trade"] = False
+                        signal["sniper_python_valid"] = sniper.valid
+                        signal["sniper_python_score"] = sniper.score
+                        signal["sniper_python_sl"] = sniper.sl
+                        signal["sniper_python_tp"] = sniper.tp
+                        signal["sniper_python_reason"] = sniper.reason
                         logger.info(
-                            f"🎯 Sniper: valid={sniper.valid} | score={sniper.score} | "
-                            f"sl={sniper.sl} tp={sniper.tp} | {sniper.reason}"
+                            f"🔧 Python Sniper (consultatif): valid={sniper.valid} | "
+                            f"score={sniper.score} | {sniper.reason}"
                         )
                     except Exception as e:
-                        logger.error(f"❌ Sniper analysis failed: {e}")
-                        signal.setdefault("sniper_valid", False)
-                        signal.setdefault("sniper_score", 0)
-                        signal.setdefault("sniper_sl", 0.0)
-                        signal.setdefault("sniper_tp", 0.0)
-                        signal.setdefault("sniper_reason", f"Sniper error: {e}")
+                        logger.error(f"❌ Python Sniper failed: {e}")
+                        signal.setdefault("sniper_python_valid", False)
+                        signal.setdefault("sniper_python_score", 0)
+                        signal.setdefault("sniper_python_sl", 0.0)
+                        signal.setdefault("sniper_python_tp", 0.0)
+                        signal.setdefault("sniper_python_reason", f"error: {e}")
                 else:
                     reason = "no_market_data" if (df_m15 is None or df_m5 is None) else "can_trade=false"
-                    signal.setdefault("sniper_valid", False)
-                    signal.setdefault("sniper_score", 0)
-                    signal.setdefault("sniper_sl", 0.0)
-                    signal.setdefault("sniper_tp", 0.0)
-                    signal.setdefault("sniper_reason", reason)
+                    signal.setdefault("sniper_python_valid", False)
+                    signal.setdefault("sniper_python_score", 0)
+                    signal.setdefault("sniper_python_sl", 0.0)
+                    signal.setdefault("sniper_python_tp", 0.0)
+                    signal.setdefault("sniper_python_reason", reason)
                     if df_m15 is None or df_m5 is None:
                         logger.warning(
                             f"⚠️ Sniper skipped: M15 age={cache.age_seconds('market_data_m15')}s "
                             f"M5 age={cache.age_seconds('market_data_m5')}s"
                         )
+
+                # === CLAUDE ICT SNIPER — gate can_trade ===
+                # Ensure sniper_* fields always exist for EA compatibility
+                signal.setdefault("sniper_valid", False)
+                signal.setdefault("sniper_score", 0)
+                signal.setdefault("sniper_sl", 0.0)
+                signal.setdefault("sniper_tp", 0.0)
+                signal.setdefault("sniper_reason", "")
+                sniper_claude_valid = signal.get("sniper_claude_valid", False)
+                if signal.get("can_trade") and not sniper_claude_valid:
+                    signal["can_trade"] = False
+                    logger.info(
+                        f"🎯 Claude ICT: sniper_valid=False | "
+                        f"ict_score={signal.get('ict_score', 0)} | "
+                        f"{signal.get('ict_reason', 'no ICT data')}"
+                    )
+                elif signal.get("can_trade") and sniper_claude_valid:
+                    # Use Claude ICT SL/TP if available, else keep originals
+                    ict_sl = signal.get("ict_sl", 0)
+                    ict_tp = signal.get("ict_tp", 0)
+                    if ict_sl > 0:
+                        signal["sniper_sl"] = ict_sl
+                    if ict_tp > 0:
+                        signal["sniper_tp"] = ict_tp
+                    signal["sniper_valid"] = True
+                    signal["sniper_score"] = signal.get("ict_score", 0)
+                    signal["sniper_reason"] = signal.get("ict_reason", "Claude ICT")
+                    logger.info(
+                        f"🎯 Claude ICT: sniper_valid=True | "
+                        f"ict_score={signal.get('ict_score', 0)} | "
+                        f"sl={ict_sl} tp={ict_tp} | {signal.get('ict_reason', '')}"
+                    )
 
                 cache.set("signal", signal)
                 logger.info(
@@ -646,6 +679,7 @@ def _background_refresh_loop():
                     f"conf={signal['confidence']}% | "
                     f"timing={signal['timing_mode']} | "
                     f"can_trade={signal['can_trade']} | "
+                    f"ict={signal.get('ict_score', 0)} | "
                     f"gold=${signal['gold_price']}"
                 )
 
