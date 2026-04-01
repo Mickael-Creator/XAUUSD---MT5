@@ -32,12 +32,12 @@ CLAUDE_CONFIG = {
     "max_tokens": 512,
     "timeout": 10,
     "min_interval_seconds": 30,
-    "temperature": 0.2,
+    "temperature": 0.35,
     "backoff_529": [60, 120, 300],  # Exponential backoff on 529 Overloaded
     # Cost optimization
     "trading_hours_start": 0,   # UTC
     "trading_hours_end": 22,    # UTC
-    "min_confidence_for_claude": 60,
+    "min_confidence_for_claude": 65,
     "cache_ttl_seconds": 300,   # 5 minutes
     "cache_gold_threshold": 2.0,   # ±$2
     "cache_confidence_threshold": 3,  # ±3%
@@ -55,7 +55,7 @@ if not _alert_logger.handlers:
         pass  # Alert log not writable — non-blocking
 
 SYSTEM_PROMPT = """Analyste quant XAUUSD + ICT sniper. Signal brut + macro/COT/sentiment/géo + bougies M15/M5.
-Rôle: 1)Cohérence signal↔macro 2)Risques cachés 3)Ajuster confiance(-20 à +20) 4)Analyse ICT sur M15/M5.
+Rôle: 1)Cohérence signal↔macro 2)Risques cachés ET opportunités cachées 3)Ajuster confiance(-20 à +20) 4)Analyse ICT sur M15/M5 5)Contrarian signals: Extreme Fear on gold (Fear & Greed < 20) is HISTORICALLY a strong bullish contrarian signal — factor this in. Identify hidden opportunities, not just risks.
 ICT: Sur M15 chercher sweep de liquidité (prise de high/low) + BOS (break of structure). Sur M5 chercher PD array mitigé (OB=order block ou FVG=fair value gap) dans la zone de pullback. Si bougies absentes, mettre ict_score=0 et sniper_valid=false.
 Contexte incrémental: seules les valeurs ayant changé significativement sont incluses. Champs absents=inchangés.
 JSON uniquement:{"confidence_adjustment":<int>,"risk_flags":[<max 3>],"claude_commentary":"<max 150c>","signal_quality":"<STRONG|MODERATE|WEAK>","sniper_valid":<bool>,"ict_score":<0-100>,"ict_sl":<float|0>,"ict_tp":<float|0>,"ict_reason":"<max 80c>"}"""
