@@ -491,7 +491,7 @@ def _calculate_signal(macro: dict, cot: dict, news: dict,
         can_trade = (
             not signal.blackout_active and
             signal.entry_strategy.value != "WAIT" and
-            signal.confidence >= 50
+            signal.confidence >= 60
         )
 
         return {
