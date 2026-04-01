@@ -928,7 +928,7 @@ void ExecuteTrade(string direction) {
    double tpPips = slPips * tpRR;
 
    // Calculate prices
-   double entry, sl, tp;
+   double sl, tp;
    if(direction == "BUY") {
       entry = ask;
       sl = entry - slPips * point * 10;
