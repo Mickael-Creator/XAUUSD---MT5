@@ -689,6 +689,7 @@ def _background_refresh_loop():
                     })
 
                 # === PYTHON SNIPER ICT ANALYSIS (consultatif — ne bloque plus can_trade) ===
+                df_h4 = cache.get_best("market_data_h4") if cache.age_seconds("market_data_h4") < 1800 else None
                 if signal.get("can_trade") and df_m15 is not None and df_m5 is not None:
                     try:
                         sniper = python_sniper.analyze_entry(
@@ -697,6 +698,7 @@ def _background_refresh_loop():
                             df_m5=df_m5,
                             current_price=signal.get("gold_price", 0),
                             spread_pips=2.0,
+                            df_h4=df_h4,
                         )
                         signal["sniper_python_valid"] = sniper.valid
                         signal["sniper_python_score"] = sniper.score
@@ -886,14 +888,17 @@ def market_data_v1():
         return jsonify({"error": "Invalid JSON"}), 400
 
     result = {}
-    for tf in ("m15", "m5"):
+    for tf in ("m15", "m5", "h4"):
         bars = data.get(tf, [])
         if bars:
             df = pd.DataFrame(bars, columns=["t", "o", "h", "l", "c", "v"])
             cache.set(f"market_data_{tf}", df)
         result[f"bars_{tf}"] = len(bars)
 
-    logger.info(f"📊 Market data: M15={result['bars_m15']} bars M5={result['bars_m5']} bars")
+    logger.info(
+        f"📊 Market data: M15={result['bars_m15']} M5={result['bars_m5']} "
+        f"H4={result['bars_h4']} bars"
+    )
 
     return jsonify({"status": "ok", **result}), 200
 

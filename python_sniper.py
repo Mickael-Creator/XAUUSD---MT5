@@ -108,6 +108,7 @@ class SniperResult:
     pd_type: str = "NONE"
     reason: str = ""
     session: str = ""
+    htf_bias: str = "NEUTRAL"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -534,7 +535,8 @@ class SniperScorer:
                   pullback: PullbackZone,
                   m5_confirm: M5Confirmation,
                   session_boost: int,
-                  use_m5_confirm: bool = True) -> int:
+                  use_m5_confirm: bool = True,
+                  htf_bias_score: int = 0) -> int:
         score = 0
 
         # Structure alignment (20 pts)
@@ -542,6 +544,9 @@ class SniperScorer:
             score += 20
         else:
             score += 10
+
+        # HTF Bias H4 (+20 aligned, -20 opposed, 0 neutral/unavailable)
+        score += htf_bias_score
 
         # Liquidity sweep (25 pts)
         if sweep.detected and sweep.reclaimed:
@@ -612,6 +617,33 @@ def _to_series(df: pd.DataFrame) -> tuple:
     return o, h, l, c
 
 
+def _calc_ema(values: np.ndarray, period: int) -> float:
+    """Calculate EMA on series array (0=most recent). Returns EMA at bar 0."""
+    n = len(values)
+    if n < period:
+        return float(np.mean(values[:n]))
+    k = 2.0 / (period + 1)
+    ema = float(np.mean(values[n - period:]))  # SMA seed from oldest bars
+    for i in range(n - period - 1, -1, -1):  # walk toward most recent
+        ema = values[i] * k + ema * (1 - k)
+    return ema
+
+
+def _calc_htf_bias(c_h4: np.ndarray, ema_fast: int = 20, ema_slow: int = 50) -> str:
+    """Determine H4 bias from EMA20/EMA50 crossover. Returns BULLISH/BEARISH/NEUTRAL."""
+    n = len(c_h4)
+    if n < ema_slow:
+        return "NEUTRAL"
+    fast = _calc_ema(c_h4, ema_fast)
+    slow = _calc_ema(c_h4, ema_slow)
+    diff_pips = (fast - slow) / PIP
+    if diff_pips > 2.0:
+        return "BULLISH"
+    if diff_pips < -2.0:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
 def _calc_atr(h: np.ndarray, l: np.ndarray, c: np.ndarray, period: int = 14) -> float:
     """Calculate ATR from series arrays. Returns ATR at bar 1 (last closed)."""
     n = len(h)
@@ -652,7 +684,8 @@ class PythonSniperM15:
 
     def analyze_entry(self, direction: str, df_m15: pd.DataFrame,
                       df_m5: pd.DataFrame, current_price: float,
-                      spread_pips: float = 2.0) -> SniperResult:
+                      spread_pips: float = 2.0,
+                      df_h4: pd.DataFrame = None) -> SniperResult:
         result = SniperResult()
         session_name, session_boost = _get_session()
         result.session = session_name
@@ -673,6 +706,22 @@ class PythonSniperM15:
         # === Convert to series arrays (0=most recent) ===
         o15, h15, l15, c15 = _to_series(df_m15)
         o5, h5, l5, c5 = _to_series(df_m5)
+
+        # === HTF Bias H4 (optional — graceful if df_h4 is None) ===
+        htf_bias = "NEUTRAL"
+        htf_bias_score = 0
+        if df_h4 is not None and len(df_h4) >= 50:
+            _, _, _, c_h4 = _to_series(df_h4)
+            htf_bias = _calc_htf_bias(c_h4)
+            if direction == "BUY" and htf_bias == "BULLISH":
+                htf_bias_score = 20
+            elif direction == "SELL" and htf_bias == "BEARISH":
+                htf_bias_score = 20
+            elif direction == "BUY" and htf_bias == "BEARISH":
+                htf_bias_score = -20
+            elif direction == "SELL" and htf_bias == "BULLISH":
+                htf_bias_score = -20
+        result.htf_bias = htf_bias
 
         # === Step 1: Detect swing points on M15 ===
         swing_highs = SwingDetector.find_swing_highs(h15, self.SWING_LOOKBACK)
@@ -781,6 +830,7 @@ class PythonSniperM15:
             m5_confirm=m5_confirm,
             session_boost=session_boost,
             use_m5_confirm=self.USE_M5_CONFIRM,
+            htf_bias_score=htf_bias_score,
         )
 
         # === Step 7: Calculate SL/TP ===
