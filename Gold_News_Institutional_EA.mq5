@@ -657,29 +657,34 @@ bool ParseSignalJSON(string json) {
    if(blackoutMin < 0) blackoutMin = 0;
    g_Signal.blackout_minutes = blackoutMin;
 
-   // Claude ICT Sniper fields — safe defaults if absent
+   // Claude ICT Sniper fields — DISABLED: VPS no longer sends sniper fields
    bool sniperValid = false;
-   parser.GetBool("sniper_valid", sniperValid);
+   // DISABLED: VPS no longer sends sniper fields
+   // parser.GetBool("sniper_valid", sniperValid);
    g_Signal.sniper_valid = sniperValid;
 
    int sniperScore = 0;
-   if(!parser.GetInt("sniper_score", sniperScore) || sniperScore < 0)
-      sniperScore = 0;
+   // DISABLED: VPS no longer sends sniper fields
+   // if(!parser.GetInt("sniper_score", sniperScore) || sniperScore < 0)
+   //    sniperScore = 0;
    if(sniperScore > 100) sniperScore = 100;
    g_Signal.sniper_score = sniperScore;
 
    double sniperSL = 0.0;
-   parser.GetDouble("sniper_sl", sniperSL);
+   // DISABLED: VPS no longer sends sniper fields
+   // parser.GetDouble("sniper_sl", sniperSL);
    if(sniperSL < 0) sniperSL = 0.0;
    g_Signal.sniper_sl = sniperSL;
 
    double sniperTP = 0.0;
-   parser.GetDouble("sniper_tp", sniperTP);
+   // DISABLED: VPS no longer sends sniper fields
+   // parser.GetDouble("sniper_tp", sniperTP);
    if(sniperTP < 0) sniperTP = 0.0;
    g_Signal.sniper_tp = sniperTP;
 
    string sniperReason = "";
-   parser.GetString("sniper_reason", sniperReason);
+   // DISABLED: VPS no longer sends sniper fields
+   // parser.GetString("sniper_reason", sniperReason);
    g_Signal.sniper_reason = sniperReason;
 
    g_Signal.is_valid    = true;
