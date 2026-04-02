@@ -30,6 +30,7 @@ from news_fetcher_v2 import fetch_forex_factory_news as fetch_news_v2
 from news_trading_signal import NewsTradingAnalyzer, create_news_trading_endpoint
 from claude_decision_engine import claude_engine
 from python_sniper import python_sniper
+from fred_service import fred_manager, get_tips_yield, get_breakeven_inflation, get_fed_funds_rate
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -79,7 +80,7 @@ CONFIG = {
         "macro":       {"us10y": 4.21, "real_rate": 1.8, "dxy": 96.1, "vix": 15.4, "cot": {}},
         "cot":         {"percentile": 50.0, "regime": "NEUTRAL", "net_positions": 0},
         "news":        {"events": [], "next_high_impact": None, "time_until_hours": None, "in_blackout": False},
-        "sentiment":   {"fear_greed_index": 50, "fear_greed_label": "Neutral"},
+        "sentiment":   {"fear_greed_index": 50, "fear_greed_label": "Neutral", "gold_sentiment_score": 50.0, "source": "fallback"},
         "geopolitics": {"tension_level": 5, "hot_zones_active": ["Ukraine", "Russia", "Gaza", "China"],
                         "recent_headlines": [], "safe_haven_demand": "MODERATE"},
         "signal":      {
@@ -488,20 +489,55 @@ def _fetch_news() -> dict:
 
 
 def _fetch_sentiment() -> dict:
-    """Fetch Fear & Greed index"""
+    """
+    Gold-specific sentiment score (replaces crypto Fear & Greed).
+    Formula: gold_sentiment = (COT percentile × 0.6) + (VIX inverse × 0.4)
+    Range: 0 = extreme fear, 100 = extreme greed.
+
+    COT percentile: higher net longs → more greed (already 0-100).
+    VIX inverse:    VIX 10 → greed (100), VIX 40+ → fear (0).
+                    Mapped linearly: inverse = max(0, min(100, (40 - VIX) / 30 * 100))
+    """
     try:
-        r = requests.get(CONFIG["fear_greed_url"], timeout=8)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("data"):
-                fg = data["data"][0]
-                return {
-                    "fear_greed_index": int(fg.get("value", 50)),
-                    "fear_greed_label": fg.get("value_classification", "Neutral")
-                }
+        cot = cache.get_best("cot")
+        macro = cache.get_best("macro")
+
+        cot_pct = cot.get("percentile", 50.0)
+        vix = macro.get("vix", 15.0)
+
+        # VIX inverse: 10→100 (greed), 40→0 (fear)
+        vix_inverse = max(0.0, min(100.0, (40.0 - vix) / 30.0 * 100.0))
+
+        gold_sentiment = round(cot_pct * 0.6 + vix_inverse * 0.4, 1)
+
+        # Map to label
+        if gold_sentiment <= 20:
+            label = "Extreme Fear"
+        elif gold_sentiment <= 40:
+            label = "Fear"
+        elif gold_sentiment <= 60:
+            label = "Neutral"
+        elif gold_sentiment <= 80:
+            label = "Greed"
+        else:
+            label = "Extreme Greed"
+
+        return {
+            "fear_greed_index": int(gold_sentiment),
+            "fear_greed_label": label,
+            "gold_sentiment_score": gold_sentiment,
+            "components": {
+                "cot_percentile": round(cot_pct, 1),
+                "cot_weight": 0.6,
+                "vix": round(vix, 2),
+                "vix_inverse": round(vix_inverse, 1),
+                "vix_weight": 0.4,
+            },
+            "source": "gold_composite",
+        }
     except Exception as e:
-        logger.warning(f"Sentiment fetch failed (using cache): {e}")
-    return cache.get_best("sentiment")
+        logger.warning(f"Gold sentiment calc failed (using cache): {e}")
+        return cache.get_best("sentiment")
 
 
 def _fetch_geopolitics() -> dict:
