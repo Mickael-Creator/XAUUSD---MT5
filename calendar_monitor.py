@@ -16,6 +16,7 @@ import schedule
 import time
 import threading
 import yfinance as yf
+from fred_service import get_tips_yield, get_fed_funds_rate
 
 # ============================================================================
 # CONFIGURATION
@@ -163,7 +164,7 @@ def get_macro_data():
                 'status': 'success',
                 'us10y': fetch_us10y_live(),
                 'inflation_target': row[1],
-                'real_rate': round(fetch_us10y_live() - 2.45, 2),
+                'real_rate': round(get_tips_yield(), 2),
                 'macro_score': row[3],
                 'geopolitical_score': row[4],
                 'last_update': row[5],
@@ -176,7 +177,7 @@ def get_macro_data():
                 'status': 'default',
                 'us10y': fetch_us10y_live(),
                 'inflation_target': 2.45,
-                'real_rate': round(fetch_us10y_live() - 2.45, 2),
+                'real_rate': round(get_tips_yield(), 2),
                 'macro_score': 2,
                 'geopolitical_score': 1,
                 'message': 'Using default values'
@@ -309,8 +310,8 @@ def update_macro_data():
         ''', (
             datetime.now().isoformat(),
             fetch_us10y_live(),
-            2.45,
-            round(fetch_us10y_live() - 2.45, 2),
+            get_fed_funds_rate(),
+            round(get_tips_yield(), 2),
             2,
             1,
             '90%'
