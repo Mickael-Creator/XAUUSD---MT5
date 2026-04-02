@@ -38,7 +38,7 @@ CLAUDE_CONFIG = {
     "trading_hours_start": 0,   # UTC
     "trading_hours_end": 22,    # UTC
     "min_confidence_for_claude": 60,
-    "cache_ttl_seconds": 300,   # 5 minutes
+    "cache_ttl_seconds": 600,   # 10 minutes
     "cache_gold_threshold": 2.0,   # ±$2
     "cache_confidence_threshold": 3,  # ±3%
 }
@@ -398,7 +398,7 @@ class ClaudeDecisionEngine:
         raise ValueError(f"Unbalanced JSON in response: {text[:200]}")
 
     @staticmethod
-    def _serialize_candles(df, max_bars: int = 30) -> list[list]:
+    def _serialize_candles(df, max_bars: int = 15) -> list[list]:
         """Serialize a candle DataFrame to compact OHLC list (last N bars, oldest first)."""
         if df is None or not hasattr(df, 'iloc'):
             return []
