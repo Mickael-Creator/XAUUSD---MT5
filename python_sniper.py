@@ -844,9 +844,8 @@ class PythonSniperM15:
             result.reason = "No mitigation on M5 PD array"
             return result
 
-        if pullback.mitigated and not pullback.choch_m5:
-            result.reason = f"Mitigated {pullback.pd_type} but no CHoCH M5"
-            return result
+        # CHoCH M5 is now a scoring bonus (+10 pts in scorer), not a hard gate.
+        # Trades can proceed without CHoCH M5 but with a lower score.
 
         # === Step 5: M5 Confirmation ===
         m5_confirm = M5PatternDetector.detect(o5, c5, h5, l5, direction)
