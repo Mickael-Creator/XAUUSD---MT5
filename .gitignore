@@ -1,0 +1,12 @@
+*.log
+*.db
+*.pkl
+*.pyc
+__pycache__/
+.cache/
+backups/
+logs/
+archives/
+venv/
+*.zip
+*.gz
