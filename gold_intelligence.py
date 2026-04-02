@@ -110,6 +110,92 @@ CONFIG = {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CIRCUIT BREAKER — Protection contre les pertes consécutives
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CircuitBreaker:
+    """
+    Si les 3 derniers signaux can_trade=True montrent une chute de prix > 50 pips
+    depuis le premier signal → force can_trade=False pendant 2 heures.
+    Thread-safe.
+    """
+    MAX_HISTORY = 3
+    PRICE_DROP_THRESHOLD_PIPS = 50.0   # 50 pips = $5.0 sur XAUUSD
+    LOCKOUT_SECONDS = 2 * 3600         # 2 heures
+
+    def __init__(self):
+        self._lock = Lock()
+        self._history = []        # list of {"price": float, "timestamp": datetime}
+        self._locked_until = None  # datetime UTC when lockout expires
+
+    def record_signal(self, gold_price: float):
+        """Enregistre un signal can_trade=True avec son prix."""
+        with self._lock:
+            self._history.append({
+                "price": gold_price,
+                "timestamp": datetime.now(timezone.utc),
+            })
+            # Garder seulement les N derniers
+            if len(self._history) > self.MAX_HISTORY:
+                self._history = self._history[-self.MAX_HISTORY:]
+
+    def check(self, current_price: float) -> tuple:
+        """
+        Retourne (is_locked: bool, reason: str).
+        Vérifie :
+        1. Lockout actif (2h après déclenchement)
+        2. Chute de prix > 50 pips sur les 3 derniers signaux can_trade=True
+        """
+        with self._lock:
+            now = datetime.now(timezone.utc)
+
+            # Vérifier lockout actif
+            if self._locked_until and now < self._locked_until:
+                remaining = int((self._locked_until - now).total_seconds() / 60)
+                return True, f"circuit_breaker_locked ({remaining}min remaining)"
+
+            # Reset lockout expiré
+            if self._locked_until and now >= self._locked_until:
+                self._locked_until = None
+                self._history.clear()
+                logger.info("🔓 Circuit breaker lockout expired — reset")
+
+            # Vérifier condition de déclenchement
+            if len(self._history) >= self.MAX_HISTORY:
+                first_price = self._history[0]["price"]
+                drop_pips = (first_price - current_price) / 0.10  # XAUUSD: 1 pip = $0.10
+
+                if drop_pips >= self.PRICE_DROP_THRESHOLD_PIPS:
+                    self._locked_until = now + timedelta(seconds=self.LOCKOUT_SECONDS)
+                    logger.warning(
+                        f"🚨 CIRCUIT BREAKER TRIGGERED: {drop_pips:.1f} pips drop "
+                        f"(${first_price:.2f} → ${current_price:.2f}) over last "
+                        f"{self.MAX_HISTORY} can_trade signals. "
+                        f"Locked until {self._locked_until.strftime('%H:%M UTC')}"
+                    )
+                    return True, f"circuit_breaker_triggered ({drop_pips:.0f} pips drop)"
+
+            return False, ""
+
+    def status(self) -> dict:
+        """Retourne l'état du circuit breaker pour le health check."""
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            is_locked = self._locked_until is not None and now < self._locked_until
+            return {
+                "locked": is_locked,
+                "locked_until": self._locked_until.isoformat() if self._locked_until else None,
+                "history_count": len(self._history),
+                "history": [
+                    {"price": h["price"], "age_s": int((now - h["timestamp"]).total_seconds())}
+                    for h in self._history
+                ],
+            }
+
+
+circuit_breaker = CircuitBreaker()
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CACHE INSTITUTIONNEL — CŒUR DU SYSTÈME
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -673,12 +759,30 @@ def _background_refresh_loop():
                         f"sl={ict_sl} tp={ict_tp} | {signal.get('ict_reason', '')}"
                     )
 
+                # === CIRCUIT BREAKER — 3 signaux can_trade + chute 50 pips → lockout 2h ===
+                current_price = signal.get("gold_price", 0)
+                if signal.get("can_trade") and current_price > 0:
+                    # Enregistrer ce signal can_trade=True
+                    circuit_breaker.record_signal(current_price)
+                    # Vérifier si le circuit breaker doit bloquer
+                    cb_locked, cb_reason = circuit_breaker.check(current_price)
+                    if cb_locked:
+                        signal["can_trade"] = False
+                        signal["circuit_breaker"] = cb_reason
+                        logger.warning(f"🚨 Circuit breaker: {cb_reason}")
+                else:
+                    # Vérifier si un lockout est toujours actif même si can_trade est déjà False
+                    cb_locked, cb_reason = circuit_breaker.check(current_price if current_price > 0 else 0)
+                    if cb_locked:
+                        signal["circuit_breaker"] = cb_reason
+
                 cache.set("signal", signal)
                 logger.info(
                     f"🎯 Signal: {signal['direction']} | "
                     f"conf={signal['confidence']}% | "
                     f"timing={signal['timing_mode']} | "
                     f"can_trade={signal['can_trade']} | "
+                    f"cb={signal.get('circuit_breaker', 'ok')} | "
                     f"ict={signal.get('ict_score', 0)} | "
                     f"gold=${signal['gold_price']}"
                 )
@@ -817,6 +921,7 @@ def health_v1():
         "warmup_done":  _warmup_done.is_set(),
         "signal_age_s": cache.age_seconds("signal"),
         "market_data":  market,
+        "circuit_breaker": circuit_breaker.status(),
         "timestamp":    datetime.now(timezone.utc).isoformat() + "Z",
     }), 200
 
