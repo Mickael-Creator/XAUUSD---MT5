@@ -581,11 +581,9 @@ bool ParseSignalJSON(string json) {
       Print("[AUDIT-C1] Response signature present: ", StringSubstr(signature, 0, 16), "...");
    }
 
-   // can_trade — AUDIT-C1: GetBool tolerates any spacing around ':'
-   bool canTrade = false;
-   if(!parser.GetBool("can_trade", canTrade))
-      canTrade = false;
-   g_Signal.can_trade = canTrade;
+   // can_trade géré localement par QualityFilters (circuit breaker EA)
+   // Le circuit breaker Python VPS est désactivé pour éviter le double blocage
+   g_Signal.can_trade = true;
 
    // direction
    string direction = "NONE";
@@ -730,10 +728,10 @@ void CheckEntry() {
    
    //================================================================
    // STEP 2: CAN_TRADE GATE
+   // NOTE: Toujours true - géré par QualityFilters Gate 5
+   // Circuit breaker local : maxConsecutiveLosses=3, cooldown=45min après perte
    //================================================================
-   if(!g_Signal.can_trade) {
-      return;
-   }
+   // if(!g_Signal.can_trade) { return; }  // Désactivé - doublon VPS
    
    //================================================================
    // STEP 3: CONFIDENCE GATE
@@ -772,47 +770,38 @@ void CheckEntry() {
    }
    
    //================================================================
-   // STEP 6: CLAUDE ICT SNIPER (VPS Linux decision)
+   // STEP 6: SNIPER M15 ENTRY (Find precise entry point)
    //================================================================
-   // Replaced local CSniperM15.AnalyzeEntry() by Claude ICT signal from VPS
-   if(!g_Signal.sniper_valid) {
-      return;  // Claude ICT did not validate entry
+   if(g_sniper == NULL) {
+      Print("CheckEntry: Sniper is NULL");
+      return;
    }
+
    // Adjust score threshold based on timing mode
    int scoreThreshold = Sniper_Min_Score;
    if(g_Signal.timing_mode == "POST_NEWS_ENTRY") {
       scoreThreshold = 50;  // Lower for fade opportunities
    }
 
-   if(g_Signal.sniper_score < scoreThreshold) {
+   g_LastSniper = g_sniper.AnalyzeEntry(direction, g_Signal.confidence, g_Signal.timing_mode);
+
+   if(!g_LastSniper.isValid) {
+      return;  // No valid entry on M15
+   }
+
+   if(g_LastSniper.score < scoreThreshold) {
       return;
    }
 
-   // Validate SL price is on correct side of market
-   double currentPrice = (direction == "BUY")
-      ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-      : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(g_Signal.sniper_sl <= 0 || currentPrice <= 0) {
-      Print("⚠️ Claude ICT: invalid SL (", g_Signal.sniper_sl, ") or price (", currentPrice, ")");
-      return;
-   }
-   if(direction == "BUY" && g_Signal.sniper_sl >= currentPrice) {
-      Print("⚠️ Claude ICT: BUY but SL (", DoubleToString(g_Signal.sniper_sl, 2),
-            ") >= Ask (", DoubleToString(currentPrice, 2), ")");
-      return;
-   }
-   if(direction == "SELL" && g_Signal.sniper_sl <= currentPrice) {
-      Print("⚠️ Claude ICT: SELL but SL (", DoubleToString(g_Signal.sniper_sl, 2),
-            ") <= Bid (", DoubleToString(currentPrice, 2), ")");
-      return;
-   }
-
-   // Log Claude ICT analysis
-   Print("🎯 CLAUDE ICT SNIPER VALIDATED:");
-   Print("   Score: ", g_Signal.sniper_score);
-   Print("   SL: ", DoubleToString(g_Signal.sniper_sl, 2));
-   Print("   TP: ", DoubleToString(g_Signal.sniper_tp, 2));
-   Print("   Reason: ", g_Signal.sniper_reason);
+   // Log sniper analysis
+   Print("SNIPER M15 VALIDATED:");
+   Print("   Score: ", g_LastSniper.score);
+   Print("   Sweep: ", g_LastSniper.sweep.detected ? "YES" : "NO");
+   Print("   BOS: ", g_LastSniper.bos.detected ? g_LastSniper.bos.direction : "NONE");
+   Print("   PD: ", g_LastSniper.pullback.pdType,
+         " | Mitigated: ", g_LastSniper.pullback.mitigated ? "YES" : "NO",
+         " | CHoCH M5: ", g_LastSniper.pullback.chochM5 ? "YES" : "NO");
+   Print("   M5 Pattern: ", g_LastSniper.m5Confirm.patternName);
 
    //================================================================
    // STEP 7: EXECUTE TRADE
@@ -841,9 +830,9 @@ void ExecuteTrade(string direction) {
       return;
    }
 
-   // Get SL from Claude ICT signal (absolute price → pips)
+   // Get SL from local Sniper M15 analysis
    double entry = (direction == "BUY") ? ask : bid;
-   double slPips = MathAbs(entry - g_Signal.sniper_sl) / (point * 10);
+   double slPips = g_LastSniper.slPips;
 
    // CORRECTION 21: Validation SL — clamp within FTMO-safe range
    if(slPips < Sniper_SL_Min_Pips) slPips = Sniper_SL_Min_Pips;
