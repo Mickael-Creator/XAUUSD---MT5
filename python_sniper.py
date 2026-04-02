@@ -109,6 +109,7 @@ class SniperResult:
     reason: str = ""
     session: str = ""
     htf_bias: str = "NEUTRAL"
+    in_ote: bool = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -536,7 +537,8 @@ class SniperScorer:
                   m5_confirm: M5Confirmation,
                   session_boost: int,
                   use_m5_confirm: bool = True,
-                  htf_bias_score: int = 0) -> int:
+                  htf_bias_score: int = 0,
+                  ote_score: int = 0) -> int:
         score = 0
 
         # Structure alignment (20 pts)
@@ -569,6 +571,9 @@ class SniperScorer:
                 score += 10
             if pullback.bos_m5:
                 score += 5
+
+        # OTE Fibonacci (15 pts if price in 61.8%-78.6% retracement)
+        score += ote_score
 
         # M5 Confirmation (15 pts max)
         if use_m5_confirm:
@@ -742,6 +747,31 @@ class PythonSniperM15:
             ll = swing_lows[0].price < swing_lows[1].price
             structure_aligned = (lh and ll)
 
+        # === OTE Fibonacci (61.8%-78.6% retracement of last swing) ===
+        ote_score = 0
+        in_ote = False
+        if direction == "BUY" and swing_highs and swing_lows:
+            sh = swing_highs[0].price
+            sl_level = swing_lows[0].price
+            swing_range = sh - sl_level
+            if swing_range > PIP:
+                ote_low = sh - swing_range * 0.786
+                ote_high = sh - swing_range * 0.618
+                if ote_low <= current_price <= ote_high:
+                    ote_score = 15
+                    in_ote = True
+        elif direction == "SELL" and swing_highs and swing_lows:
+            sh = swing_highs[0].price
+            sl_level = swing_lows[0].price
+            swing_range = sh - sl_level
+            if swing_range > PIP:
+                ote_low = sl_level + swing_range * 0.618
+                ote_high = sl_level + swing_range * 0.786
+                if ote_low <= current_price <= ote_high:
+                    ote_score = 15
+                    in_ote = True
+        result.in_ote = in_ote
+
         # === Step 2: Detect Liquidity Sweep ===
         target_swings = swing_lows if direction == "BUY" else swing_highs
         sweep = LiquiditySweepDetector.detect_sweep(
@@ -831,6 +861,7 @@ class PythonSniperM15:
             session_boost=session_boost,
             use_m5_confirm=self.USE_M5_CONFIRM,
             htf_bias_score=htf_bias_score,
+            ote_score=ote_score,
         )
 
         # === Step 7: Calculate SL/TP ===
