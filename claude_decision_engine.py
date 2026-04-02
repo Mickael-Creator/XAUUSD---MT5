@@ -55,7 +55,8 @@ if not _alert_logger.handlers:
         pass  # Alert log not writable — non-blocking
 
 SYSTEM_PROMPT = """Analyste quant XAUUSD + ICT sniper. Signal brut + macro/COT/sentiment/géo + bougies M15/M5.
-Rôle: 1)Cohérence signal↔macro 2)Risques cachés ET opportunités cachées 3)Ajuster confiance(-20 à +20) 4)Analyse ICT sur M15/M5 5)Contrarian signals: Extreme Fear on gold (Fear & Greed < 20) is HISTORICALLY a strong bullish contrarian signal — factor this in. Identify hidden opportunities, not just risks.
+Macro enrichi: real_rate=TIPS 10Y yield (FRED DFII10), breakeven_inflation=BEI 10Y (T10YIE), fed_funds_rate=EFFR effectif. Sentiment=gold composite (COT×0.6+VIX_inv×0.4), pas crypto.
+Rôle: 1)Cohérence signal↔macro 2)Risques cachés ET opportunités cachées 3)Ajuster confiance(-20 à +20) 4)Analyse ICT sur M15/M5 5)Contrarian signals: Extreme Fear on gold (sentiment < 20) is HISTORICALLY a strong bullish contrarian signal — factor this in. Real yields falling = bullish gold. BEI rising = bullish gold.
 ICT: Sur M15 chercher sweep de liquidité (prise de high/low) + BOS (break of structure). Sur M5 chercher PD array mitigé (OB=order block ou FVG=fair value gap) dans la zone de pullback. Si bougies absentes, mettre ict_score=0 et sniper_valid=false.
 Contexte incrémental: seules les valeurs ayant changé significativement sont incluses. Champs absents=inchangés.
 JSON uniquement:{"confidence_adjustment":<int>,"risk_flags":[<max 3>],"claude_commentary":"<max 150c>","signal_quality":"<STRONG|MODERATE|WEAK>","sniper_valid":<bool>,"ict_score":<0-100>,"ict_sl":<float|0>,"ict_tp":<float|0>,"ict_reason":"<max 80c>"}"""
@@ -70,7 +71,10 @@ CHANGE_THRESHOLDS = {
     "macro.vix": 1.0,
     "macro.us10y": 0.1,
     "macro.real_rate": 0.1,
+    "macro.breakeven_inflation": 0.05,
+    "macro.fed_funds_rate": 0.1,
     "sentiment.fear_greed_index": 5,
+    "sentiment.gold_sentiment_score": 5,
 }
 
 # Stable: include at most once per interval (seconds)

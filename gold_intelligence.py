@@ -77,7 +77,7 @@ CONFIG = {
         "gold_price":  {"price": 4390.0,  "source": "fallback"},
         "dxy":         {"dxy_index": 96.1},
         "vix":         {"vix_level": 15.4},
-        "macro":       {"us10y": 4.21, "real_rate": 1.8, "dxy": 96.1, "vix": 15.4, "cot": {}},
+        "macro":       {"us10y": 4.21, "real_rate": 1.8, "breakeven_inflation": 2.3, "fed_funds_rate": 5.33, "dxy": 96.1, "vix": 15.4, "cot": {}},
         "cot":         {"percentile": 50.0, "regime": "NEUTRAL", "net_positions": 0},
         "news":        {"events": [], "next_high_impact": None, "time_until_hours": None, "in_blackout": False},
         "sentiment":   {"fear_greed_index": 50, "fear_greed_label": "Neutral", "gold_sentiment_score": 50.0, "source": "fallback"},
@@ -420,7 +420,7 @@ def _fetch_gold_price() -> dict:
 
 
 def _fetch_macro() -> dict:
-    """Fetch macro data depuis le service local avec timeout court"""
+    """Fetch macro data depuis le service local + FRED avec timeout court"""
     result = cache.get_best("macro").copy()  # Part du dernier connu
 
     try:
@@ -428,9 +428,13 @@ def _fetch_macro() -> dict:
         if r.status_code == 200:
             data = r.json()
             result["us10y"]     = data.get("us10y",     result.get("us10y"))
-            result["real_rate"] = data.get("real_rate", result.get("real_rate"))
     except Exception as e:
         logger.warning(f"Macro fetch failed (using cache): {e}")
+
+    # FRED real yield replaces the old US10Y - 2.45 hack
+    result["real_rate"]            = get_tips_yield()
+    result["breakeven_inflation"]  = get_breakeven_inflation()
+    result["fed_funds_rate"]       = get_fed_funds_rate()
 
     try:
         r = requests.get(f"{CONFIG['local_api_base']}/dxy_data", timeout=3)
@@ -674,7 +678,7 @@ def _background_refresh_loop():
             if not cache.is_fresh("macro"):
                 data = _fetch_macro()
                 cache.set("macro", data)
-                logger.info(f"📊 Macro: US10Y={data.get('us10y')} DXY={data.get('dxy')} VIX={data.get('vix')}")
+                logger.info(f"📊 Macro: US10Y={data.get('us10y')} RealYield={data.get('real_rate')} BEI={data.get('breakeven_inflation')} FedRate={data.get('fed_funds_rate')} DXY={data.get('dxy')} VIX={data.get('vix')}")
 
             # === COT — toutes les 1h ===
             if not cache.is_fresh("cot"):
