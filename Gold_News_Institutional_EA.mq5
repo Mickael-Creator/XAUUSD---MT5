@@ -102,7 +102,7 @@ input double Max_Daily_Loss_EUR = 400.0;
 input double Max_Daily_Trades = 6;
 input double FTMO_Daily_DD_Limit = 4.5;    // % - arrÃªt Ã  4.5% (avant 5%)
 // FIX C3 (2026-04-03): Balance initiale FTMO pour calcul DD total
-input double FTMO_Initial_Balance = 100000.0; // Taille du compte FTMO challenge
+input double FTMO_Initial_Balance = 10000.0;  // Taille du compte FTMO challenge 10K
 input double FTMO_Total_DD_Limit = 9.0;       // % - arret a 9% (limite FTMO 10%)
 
 //+------------------------------------------------------------------+
