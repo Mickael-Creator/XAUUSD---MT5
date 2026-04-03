@@ -135,12 +135,7 @@ struct NewsSignal {
    int      blackout_minutes; // Minutes restantes si blackout
    bool     is_valid;
    datetime last_update;
-   // Claude ICT Sniper (from VPS Linux)
-   bool     sniper_valid;     // Claude ICT entry validated
-   int      sniper_score;     // 0-100 ICT score
-   double   sniper_sl;        // Stop-loss price (absolute)
-   double   sniper_tp;        // Take-profit price (absolute)
-   string   sniper_reason;    // ICT reason text
+   // CLEANUP (2026-04-03): sniper_* supprimés — champs jamais alimentés par l'API VPS
 };
 
 //+------------------------------------------------------------------+
@@ -148,7 +143,7 @@ struct NewsSignal {
 //+------------------------------------------------------------------+
 NewsSignal g_Signal;
 datetime g_LastAPICall = 0;
-datetime g_LastMarketPush = 0;
+// CLEANUP (2026-04-03): g_LastMarketPush supprimé — orphelin de PushMarketData
 
 // Position state
 bool g_InPosition = false;
@@ -468,103 +463,7 @@ bool FetchNewsSignal() {
    return ParseSignalJSON(json);
 }
 
-//+------------------------------------------------------------------+
-//| PUSH M15/M5 MARKET DATA TO VPS                                    |
-//+------------------------------------------------------------------+
-void PushMarketData() {
-   // Build JSON: {"m15":[[t,o,h,l,c,v],...], "m5":[[t,o,h,l,c,v],...]}
-   string json = "{";
-
-   // --- M15 bars (last 30 = 7.5h) ---
-   int m15_count = 30;
-   double m15_o[], m15_h[], m15_l[], m15_c[];
-   long   m15_v[];
-   datetime m15_t[];
-   int got_m15 = CopyOpen(_Symbol, PERIOD_M15, 0, m15_count, m15_o);
-   if(got_m15 > 0) {
-      CopyHigh(_Symbol,  PERIOD_M15, 0, got_m15, m15_h);
-      CopyLow(_Symbol,   PERIOD_M15, 0, got_m15, m15_l);
-      CopyClose(_Symbol, PERIOD_M15, 0, got_m15, m15_c);
-      CopyTickVolume(_Symbol, PERIOD_M15, 0, got_m15, m15_v);
-      CopyTime(_Symbol,  PERIOD_M15, 0, got_m15, m15_t);
-
-      json += "\"m15\":[";
-      for(int i = 0; i < got_m15; i++) {
-         if(i > 0) json += ",";
-         json += "[" + IntegerToString((long)m15_t[i]) + ","
-                     + DoubleToString(m15_o[i], 2) + ","
-                     + DoubleToString(m15_h[i], 2) + ","
-                     + DoubleToString(m15_l[i], 2) + ","
-                     + DoubleToString(m15_c[i], 2) + ","
-                     + IntegerToString(m15_v[i]) + "]";
-      }
-      json += "]";
-   } else {
-      json += "\"m15\":[]";
-   }
-
-   // --- M5 bars (last 30 = 2.5h) ---
-   int m5_count = 30;
-   double m5_o[], m5_h[], m5_l[], m5_c[];
-   long   m5_v[];
-   datetime m5_t[];
-   int got_m5 = CopyOpen(_Symbol, PERIOD_M5, 0, m5_count, m5_o);
-   if(got_m5 > 0) {
-      CopyHigh(_Symbol,  PERIOD_M5, 0, got_m5, m5_h);
-      CopyLow(_Symbol,   PERIOD_M5, 0, got_m5, m5_l);
-      CopyClose(_Symbol, PERIOD_M5, 0, got_m5, m5_c);
-      CopyTickVolume(_Symbol, PERIOD_M5, 0, got_m5, m5_v);
-      CopyTime(_Symbol,  PERIOD_M5, 0, got_m5, m5_t);
-
-      json += ",\"m5\":[";
-      for(int i = 0; i < got_m5; i++) {
-         if(i > 0) json += ",";
-         json += "[" + IntegerToString((long)m5_t[i]) + ","
-                     + DoubleToString(m5_o[i], 2) + ","
-                     + DoubleToString(m5_h[i], 2) + ","
-                     + DoubleToString(m5_l[i], 2) + ","
-                     + DoubleToString(m5_c[i], 2) + ","
-                     + IntegerToString(m5_v[i]) + "]";
-      }
-      json += "]";
-   } else {
-      json += ",\"m5\":[]";
-   }
-
-   json += "}";
-
-   // --- POST to VPS ---
-   string headers = "Content-Type: application/json\r\n";
-   if(StringLen(API_Auth_Token) > 0)
-      headers += "Authorization: Bearer " + API_Auth_Token + "\r\n";
-
-   char post_data[];
-   StringToCharArray(json, post_data, 0, WHOLE_ARRAY, CP_UTF8);
-   // Remove trailing null byte added by StringToCharArray
-   ArrayResize(post_data, ArraySize(post_data) - 1);
-
-   char result_data[];
-   string result_headers;
-
-   ResetLastError();
-   int res = WebRequest("POST", API_MarketData_URL, headers, API_Timeout,
-                        post_data, result_data, result_headers);
-
-   if(res == 200) {
-      g_LastMarketPush = TimeCurrent();
-      static bool first = true;
-      if(first) {
-         Print("M15/M5 market data push OK (", got_m15, "/", got_m5, " bars)");
-         first = false;
-      }
-   } else {
-      static datetime lastWarn = 0;
-      if(TimeCurrent() - lastWarn > 300) {
-         Print("Market data push failed: HTTP ", res, " err=", GetLastError());
-         lastWarn = TimeCurrent();
-      }
-   }
-}
+// CLEANUP (2026-04-03): PushMarketData() supprimé — dead code, jamais appelé
 
 //+------------------------------------------------------------------+
 //| PARSE JSON RESPONSE                                               |
@@ -664,35 +563,7 @@ bool ParseSignalJSON(string json) {
    if(blackoutMin < 0) blackoutMin = 0;
    g_Signal.blackout_minutes = blackoutMin;
 
-   // Claude ICT Sniper fields — DISABLED: VPS no longer sends sniper fields
-   bool sniperValid = false;
-   // DISABLED: VPS no longer sends sniper fields
-   // parser.GetBool("sniper_valid", sniperValid);
-   g_Signal.sniper_valid = sniperValid;
-
-   int sniperScore = 0;
-   // DISABLED: VPS no longer sends sniper fields
-   // if(!parser.GetInt("sniper_score", sniperScore) || sniperScore < 0)
-   //    sniperScore = 0;
-   if(sniperScore > 100) sniperScore = 100;
-   g_Signal.sniper_score = sniperScore;
-
-   double sniperSL = 0.0;
-   // DISABLED: VPS no longer sends sniper fields
-   // parser.GetDouble("sniper_sl", sniperSL);
-   if(sniperSL < 0) sniperSL = 0.0;
-   g_Signal.sniper_sl = sniperSL;
-
-   double sniperTP = 0.0;
-   // DISABLED: VPS no longer sends sniper fields
-   // parser.GetDouble("sniper_tp", sniperTP);
-   if(sniperTP < 0) sniperTP = 0.0;
-   g_Signal.sniper_tp = sniperTP;
-
-   string sniperReason = "";
-   // DISABLED: VPS no longer sends sniper fields
-   // parser.GetString("sniper_reason", sniperReason);
-   g_Signal.sniper_reason = sniperReason;
+   // CLEANUP (2026-04-03): bloc assignation sniper_* supprimé — dead code
 
    g_Signal.is_valid    = true;
    g_Signal.last_update = TimeCurrent();
