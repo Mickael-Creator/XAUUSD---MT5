@@ -1077,9 +1077,17 @@ void ManagePosition() {
    }
    
    // Use Position Manager
-   ENUM_EXIT_REASON exitCode = g_posMgr.ManagePosition(g_Signal.confidence / 10.0, 
+   // FIX N1 (2026-04-03): Distinguer partial TP d'une fermeture totale
+   // EXIT_TP_PARTIAL = action intermédiaire, 50% de la position reste ouverte
+   // Les autres codes = fermeture totale réelle
+   ENUM_EXIT_REASON exitCode = g_posMgr.ManagePosition(g_Signal.confidence / 10.0,
                                                         g_Signal.timing_mode == "BLACKOUT");
-   
+
+   if(exitCode == EXIT_TP_PARTIAL) {
+      Print("✅ Partial TP exécuté — suivi actif sur position restante (BE + trailing)");
+      return;  // Position toujours ouverte et gérée
+   }
+
    if(exitCode != EXIT_UNKNOWN) {
       ClosePositionHandler();
       return;
@@ -1262,7 +1270,7 @@ void UpdateDashboard() {
    // Sniper M15 status
    string sniperStatus = "";
    if(g_LastSniper.score > 0) {
-      sniperStatus = StringFormat("Sniper M15: %d/60 | PD: %s | M5: %s", 
+      sniperStatus = StringFormat("Sniper M15: %d/100 | PD: %s | M5: %s",  // FIX N2 (2026-04-03)
                                    g_LastSniper.score,
                                    g_LastSniper.pullback.pdType,
                                    g_LastSniper.m5Confirm.patternName);
@@ -1282,53 +1290,7 @@ void UpdateDashboard() {
            pnlStatus);
 }
 
-//+------------------------------------------------------------------+
-//| JSON HELPERS                                                      |
-//+------------------------------------------------------------------+
-string ExtractString(string json, string key) {
-   string search = "\"" + key + "\":";
-   int start = StringFind(json, search);
-   if(start == -1) return "";
-   
-   start += StringLen(search);
-   
-   // Skip whitespace
-   while(start < StringLen(json)) {
-      ushort c = StringGetCharacter(json, start);
-      if(c != ' ' && c != '\n' && c != '\r' && c != '\t') break;
-      start++;
-   }
-   
-   // CORRECTION 28: Validation start
-   if(start >= StringLen(json)) return "";
-   
-   // Check if string (starts with quote)
-   if(StringGetCharacter(json, start) == '"') {
-      start++;
-      int end = StringFind(json, "\"", start);
-      if(end == -1) return "";
-      return StringSubstr(json, start, end - start);
-   }
-   
-   // Non-string value
-   int end = start;
-   while(end < StringLen(json)) {
-      ushort c = StringGetCharacter(json, end);
-      if(c == ',' || c == '}' || c == ' ' || c == '\n') break;
-      end++;
-   }
-   
-   // CORRECTION 29: Validation substring
-   if(end <= start) return "";
-   
-   return StringSubstr(json, start, end - start);
-}
-
-double ExtractDouble(string json, string key) {
-   string val = ExtractString(json, key);
-   if(val == "" || val == "null") return 0;
-   return StringToDouble(val);
-}
+// FIX N3 (2026-04-03): ExtractString() et ExtractDouble() supprimés (dead code, remplacé par CJsonParser)
 
 //+------------------------------------------------------------------+
 //| KEYBOARD HANDLER                                                  |

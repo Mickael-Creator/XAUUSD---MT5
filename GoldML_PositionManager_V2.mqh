@@ -114,7 +114,7 @@ private:
    // Settings - Exit conditions
    bool     m_exitOnBOS;
    double   m_minConviction;
-   bool     m_exitBeforeNews;
+   // FIX N4 (2026-04-03): m_exitBeforeNews supprimé (redondant avec newsBlackout)
    int      m_maxBarsOpen;
    double   m_emergencyLockRR;
    
