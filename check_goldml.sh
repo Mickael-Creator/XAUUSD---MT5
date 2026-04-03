@@ -134,33 +134,14 @@ for r in d.get('claude_risk_flags',[]):
 fi
 
 # ============================================================
-#  3. Market Data Age
+#  3. Market Data (ICT local)
 # ============================================================
-hdr "3 · MARKET DATA (M15 / M5)"
+hdr "3 · MARKET DATA"
 
 health=$(curl -sf "${BASE}/v1/health" 2>/dev/null || echo "")
 
-if [[ -z "$health" ]]; then
-    field "Health endpoint" "${ko} ${R}Unreachable${RST}"
-else
-    for tf in m15 m5; do
-        key="market_data_${tf}"
-        age=$(echo "$health" | python3 -c "import sys,json; print(json.load(sys.stdin)['market_data']['${key}']['age_s'])" 2>/dev/null || echo "?")
-        has=$(echo "$health" | python3 -c "import sys,json; print(json.load(sys.stdin)['market_data']['${key}']['has_data'])" 2>/dev/null || echo "?")
-
-        if [[ "$has" != "True" ]]; then
-            field "${tf^^}" "${ko} ${R}No data${RST}"
-        elif [[ "$age" == "?" ]]; then
-            field "${tf^^}" "${warn} ${Y}Unknown${RST}"
-        else
-            if   (( age < 120  )); then age_c="${ok} ${G}${age}s${RST}"
-            elif (( age < 600  )); then age_c="${warn} ${Y}${age}s${RST}"
-            else                        age_c="${ko} ${R}${age}s (stale)${RST}"
-            fi
-            field "${tf^^} age" "$age_c"
-        fi
-    done
-fi
+field "Sniper ICT"      "${ok} ${G}LOCAL (CSniperM15 EA MT5)${RST}"
+field "Push bougies"    "${DIM}Désactivé (non nécessaire)${RST}"
 
 # ============================================================
 #  4. Claude Tokens & Cost (last 24h)
