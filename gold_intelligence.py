@@ -769,38 +769,6 @@ def _background_refresh_loop():
                 #             f"M5 age={cache.age_seconds('market_data_m5')}s"
                 #         )
 
-                # === CLAUDE ICT SNIPER — DISABLED: ICT moved to EA local (CSniperM15) ===
-                # # Ensure sniper_* fields always exist for EA compatibility
-                # signal.setdefault("sniper_valid", False)
-                # signal.setdefault("sniper_score", 0)
-                # signal.setdefault("sniper_sl", 0.0)
-                # signal.setdefault("sniper_tp", 0.0)
-                # signal.setdefault("sniper_reason", "")
-                # sniper_claude_valid = signal.get("sniper_claude_valid", False)
-                # if signal.get("can_trade") and not sniper_claude_valid:
-                #     signal["can_trade"] = False
-                #     logger.info(
-                #         f"🎯 Claude ICT: sniper_valid=False | "
-                #         f"ict_score={signal.get('ict_score', 0)} | "
-                #         f"{signal.get('ict_reason', 'no ICT data')}"
-                #     )
-                # elif signal.get("can_trade") and sniper_claude_valid:
-                #     # Use Claude ICT SL/TP if available, else keep originals
-                #     ict_sl = signal.get("ict_sl", 0)
-                #     ict_tp = signal.get("ict_tp", 0)
-                #     if ict_sl > 0:
-                #         signal["sniper_sl"] = ict_sl
-                #     if ict_tp > 0:
-                #         signal["sniper_tp"] = ict_tp
-                #     signal["sniper_valid"] = True
-                #     signal["sniper_score"] = signal.get("ict_score", 0)
-                #     signal["sniper_reason"] = signal.get("ict_reason", "Claude ICT")
-                #     logger.info(
-                #         f"🎯 Claude ICT: sniper_valid=True | "
-                #         f"ict_score={signal.get('ict_score', 0)} | "
-                #         f"sl={ict_sl} tp={ict_tp} | {signal.get('ict_reason', '')}"
-                #     )
-
                 # === CIRCUIT BREAKER — DISABLED: moved to EA local ===
                 # current_price = signal.get("gold_price", 0)
                 # if signal.get("can_trade") and current_price > 0:
@@ -825,7 +793,6 @@ def _background_refresh_loop():
                     f"timing={signal['timing_mode']} | "
                     f"can_trade={signal['can_trade']} | "
                     f"cb={signal.get('circuit_breaker', 'ok')} | "
-                    f"ict={signal.get('ict_score', 0)} | "
                     f"gold=${signal['gold_price']}"
                 )
 
