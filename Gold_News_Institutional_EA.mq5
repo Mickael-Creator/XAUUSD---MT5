@@ -253,8 +253,8 @@ int OnInit() {
       Print("âš ï¸ API not available - Will retry (this is normal on first start)");
    }
    
-   // Initial push of M15/M5 candles to VPS for Sniper ICT analysis
-   PushMarketData();
+   // DISABLED: CSniperM15 now analyses candles locally — VPS push no longer needed
+   // PushMarketData();
 
    g_DayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
    
@@ -367,10 +367,10 @@ void OnTick() {
       }
    }
 
-   // Push M15/M5 candles to VPS for Sniper ICT analysis
-   if((TimeCurrent() - g_LastMarketPush) >= API_Refresh_Seconds) {
-      PushMarketData();
-   }
+   // DISABLED: CSniperM15 now analyses candles locally — VPS push no longer needed
+   // if((TimeCurrent() - g_LastMarketPush) >= API_Refresh_Seconds) {
+   //    PushMarketData();
+   // }
 
    // Check for entry
    CheckEntry();
