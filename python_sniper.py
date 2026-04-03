@@ -110,6 +110,7 @@ class SniperResult:
     session: str = ""
     htf_bias: str = "NEUTRAL"
     in_ote: bool = False
+    equal_level_sweep: bool = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -163,6 +164,41 @@ class SwingDetector:
 
 class LiquiditySweepDetector:
     """Detect liquidity sweeps of swing points on M15."""
+
+    EQUAL_LEVEL_TOLERANCE = 5.0 * PIP  # 5 pips = 0.50 on XAUUSD
+
+    @staticmethod
+    def find_equal_levels(swings: list[SwingPoint],
+                          tolerance: float = 5.0 * PIP) -> list[float]:
+        """Find clusters of 2+ swing points at the same price (±tolerance).
+        Returns list of equal-level prices (average of cluster)."""
+        if len(swings) < 2:
+            return []
+        prices = sorted([sp.price for sp in swings])
+        clusters = []
+        i = 0
+        while i < len(prices):
+            cluster = [prices[i]]
+            j = i + 1
+            while j < len(prices) and (prices[j] - prices[i]) <= tolerance:
+                cluster.append(prices[j])
+                j += 1
+            if len(cluster) >= 2:
+                clusters.append(sum(cluster) / len(cluster))
+            i = j
+        return clusters
+
+    @staticmethod
+    def is_equal_level_sweep(sweep: 'LiquiditySweep',
+                             equal_levels: list[float],
+                             tolerance: float = 5.0 * PIP) -> bool:
+        """Check if a detected sweep hit an equal-level cluster."""
+        if not sweep.detected or not equal_levels:
+            return False
+        for lvl in equal_levels:
+            if abs(sweep.sweep_level - lvl) <= tolerance:
+                return True
+        return False
 
     @staticmethod
     def detect_sweep(h: np.ndarray, l: np.ndarray, c: np.ndarray,
@@ -538,27 +574,27 @@ class SniperScorer:
                   session_boost: int,
                   use_m5_confirm: bool = True,
                   htf_bias_score: int = 0,
-                  ote_score: int = 0) -> int:
+                  ote_score: int = 0,
+                  equal_level_score: int = 0) -> int:
         score = 0
 
-        # Structure alignment (20 pts)
+        # Structure alignment (20 pts if aligned, 0 if not — matches MQL5)
         if structure_aligned:
             score += 20
-        else:
-            score += 10
 
         # HTF Bias H4 (+20 aligned, -20 opposed, 0 neutral/unavailable)
         score += htf_bias_score
 
-        # Liquidity sweep (25 pts)
+        # Liquidity sweep (30 pts — pillar #1 ICT, matches MQL5)
         if sweep.detected and sweep.reclaimed:
-            score += 25
+            score += 30
             if sweep.bars_since <= 5:
                 score += 5
+            score += equal_level_score
 
-        # BOS (25 pts)
+        # BOS (20 pts — secondary to sweep, matches MQL5)
         if bos.detected and bos.confirmed:
-            score += 25
+            score += 20
             if bos.bars_since <= 5:
                 score += 5
 
@@ -572,7 +608,7 @@ class SniperScorer:
             if pullback.bos_m5:
                 score += 5
 
-        # OTE Fibonacci (15 pts if price in 61.8%-78.6% retracement)
+        # OTE Fibonacci (10 pts if price in 61.8%-78.6% retracement — matches MQL5)
         score += ote_score
 
         # M5 Confirmation (15 pts max)
@@ -597,15 +633,15 @@ def _get_session() -> tuple:
     hour = (datetime.now(timezone.utc).hour + 2) % 24
 
     if 7 <= hour < 9:
-        return ("LONDON_OPEN", 10)
+        return ("LONDON_OPEN", 7)
     if 9 <= hour < 12:
         return ("LONDON", 5)
     if 12 <= hour < 14:
-        return ("LONDON_NY_OVERLAP", 15)
+        return ("LONDON_NY_OVERLAP", 10)
     if 14 <= hour < 17:
         return ("NEW_YORK", 5)
     if 0 <= hour < 7:
-        return ("ASIAN", 0)
+        return ("ASIAN", 3)
     return ("OFF_HOURS", 0)
 
 
@@ -758,7 +794,7 @@ class PythonSniperM15:
                 ote_low = sh - swing_range * 0.786
                 ote_high = sh - swing_range * 0.618
                 if ote_low <= current_price <= ote_high:
-                    ote_score = 15
+                    ote_score = 10
                     in_ote = True
         elif direction == "SELL" and swing_highs and swing_lows:
             sh = swing_highs[0].price
@@ -768,7 +804,7 @@ class PythonSniperM15:
                 ote_low = sl_level + swing_range * 0.618
                 ote_high = sl_level + swing_range * 0.786
                 if ote_low <= current_price <= ote_high:
-                    ote_score = 15
+                    ote_score = 10
                     in_ote = True
         result.in_ote = in_ote
 
