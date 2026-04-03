@@ -110,7 +110,7 @@ input double FTMO_Total_DD_Limit = 9.0;       // % - arret a 9% (limite FTMO 10%
 //+------------------------------------------------------------------+
 input group "â•â•â• SESSION â•â•â•"
 input bool   Enable_Session_Filter = true;
-input string Session_Start = "00:00";
+input string Session_Start = "07:00";  // FIX m-10.1 (2026-04-03): Volume XAUUSD significatif après 07:00 GMT
 input string Session_End = "20:00";
 
 //+------------------------------------------------------------------+
@@ -157,6 +157,7 @@ string g_CurrentDirection = "";
 
 // Daily stats
 datetime g_DayStart = 0;
+double g_DayStartBalance = 0;  // FIX C-9.1 (2026-04-03): Balance début de journée FTMO
 int g_TradesToday = 0;
 double g_DailyPnL = 0;
 
@@ -260,6 +261,7 @@ int OnInit() {
    // PushMarketData();
 
    g_DayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);  // FIX C-9.1
    
    Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
    Print("   READY - Waiting for signals...");
@@ -328,7 +330,9 @@ void OnTick() {
       g_DayStart = today;
       g_TradesToday = 0;
       g_DailyPnL = 0;
-      
+      g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);  // FIX C-9.1
+      Print("📅 Nouveau jour FTMO — Balance de référence: ", DoubleToString(g_DayStartBalance, 2));
+
       // Reset filters daily counters
       if(g_filters != NULL) {
          g_filters.ResetDaily();
@@ -716,50 +720,36 @@ void CheckEntry() {
    }
    
    //================================================================
-   // STEP 1: TIMING MODE GATE
+   // STEP 1: TIMING MODE GATE — FIX m-11.3 (2026-04-03): Check BLACKOUT centralisé
    //================================================================
-   
+
    // BLACKOUT = NEVER TRADE
    if(g_Signal.timing_mode == "BLACKOUT") {
       return;  // Hard stop
    }
-   
+
    // PRE_NEWS_SETUP = Trade only if allowed and aligned
    if(g_Signal.timing_mode == "PRE_NEWS_SETUP" && !Allow_PreNews_Trading) {
       return;
    }
-   
+
    // POST_NEWS_ENTRY = This is THE opportunity (fade the spike)
    if(g_Signal.timing_mode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade) {
       return;
    }
-   
+
    //================================================================
-   // STEP 2: CAN_TRADE GATE
-   // NOTE: Toujours true - géré par QualityFilters Gate 5
-   // Circuit breaker local : maxConsecutiveLosses=3, cooldown=45min après perte
-   //================================================================
-   // if(!g_Signal.can_trade) { return; }  // Désactivé - doublon VPS
-   
-   //================================================================
-   // STEP 3: CONFIDENCE GATE
+   // STEP 2: CONFIDENCE GATE
    //================================================================
    if(g_Signal.confidence < Min_Confidence) {
       return;
    }
-   
+
    //================================================================
-   // STEP 4: DIRECTION GATE
+   // STEP 3: DIRECTION GATE
    //================================================================
    string direction = g_Signal.direction;
    if(direction != "BUY" && direction != "SELL") {
-      return;
-   }
-
-   //================================================================
-   // STEP 4B: BLACKOUT GATE — reject all entries during news blackout
-   //================================================================
-   if(g_Signal.timing_mode == "BLACKOUT") {
       return;
    }
    
@@ -772,7 +762,7 @@ void CheckEntry() {
       double price = (direction == "BUY")
                      ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                      : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      FilterResult fr = g_filters.CheckAllFilters(direction, price);
+      FilterResult fr = g_filters.CheckAllFilters(direction, price, g_Signal.timing_mode);  // FIX C-6.1
       if(!fr.passed) {
          // Log silencieux sauf premiÃ¨re fois
          static string lastReason = "";
@@ -1171,6 +1161,11 @@ void ClosePositionHandler() {
    Print("   Daily Total: ", DoubleToString(g_DailyPnL, 2), " EUR");
    Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
    
+   // FIX M-2.1 (2026-04-03): Réinitialiser le PositionManager proprement
+   if(g_posMgr != NULL) {
+      g_posMgr.UnloadPosition();
+   }
+
    // Reset position state
    g_InPosition = false;
    g_Ticket = 0;
@@ -1190,13 +1185,20 @@ bool CheckFTMOLimits() {
       return false;
    }
    
-   double ddPercent = ((balance - equity) / balance) * 100;
-   
-   if(ddPercent >= FTMO_Daily_DD_Limit) {
-      Print("ðŸš¨ FTMO DAILY DD LIMIT REACHED (", DoubleToString(ddPercent, 1), "%)");
-      return false;
+   // FIX C-9.1 (2026-04-03): DD journalier FTMO correct
+   // Méthode FTMO officielle : (balance_début_jour - equity_courante) / balance_début_jour
+   // Inclut toutes les pertes réalisées ET non-réalisées de la journée
+   if(g_DayStartBalance > 0) {
+      double ftmoDailyDD = ((g_DayStartBalance - equity) / g_DayStartBalance) * 100.0;
+      if(ftmoDailyDD >= FTMO_Daily_DD_Limit) {
+         Print("FTMO DAILY DD ATTEINT: ", DoubleToString(ftmoDailyDD, 2),
+               "% — Ref: ", DoubleToString(g_DayStartBalance, 2),
+               " Equity: ", DoubleToString(equity, 2));
+         return false;
+      }
    }
-   
+
+   // Limite trades journaliers
    if(g_TradesToday >= Max_Daily_Trades) {
       return false;
    }
@@ -1205,7 +1207,7 @@ bool CheckFTMOLimits() {
    if(FTMO_Initial_Balance > 0) {
       double totalDD = ((FTMO_Initial_Balance - equity) / FTMO_Initial_Balance) * 100.0;
       if(totalDD >= FTMO_Total_DD_Limit) {
-         Print("FTMO TOTAL DD LIMIT REACHED (", DoubleToString(totalDD, 1), "%) - Trading blocked");
+         Print("FTMO DD TOTAL ATTEINT: ", DoubleToString(totalDD, 2), "% — Trading bloqué");
          return false;
       }
    }
@@ -1359,6 +1361,10 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //|           position already open on the account.                  |
 //+------------------------------------------------------------------+
 void SyncOpenPositions() {
+   // FIX C-9.1: Initialiser balance du jour si pas encore fait
+   if(g_DayStartBalance <= 0)
+      g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+
    int total = PositionsTotal();
    for(int i = 0; i < total; i++) {
       ulong ticket = PositionGetTicket(i);
@@ -1383,6 +1389,29 @@ void SyncOpenPositions() {
       // Resume Position Manager management of this position
       if(g_posMgr != NULL) {
          g_posMgr.LoadPosition(ticket, tradeType);
+
+         // FIX C-2.1 (2026-04-03): Détecter si partial TP déjà exécuté avant le restart
+         double currentVolume = PositionGetDouble(POSITION_VOLUME);
+         double entryVolume = 0.0;
+
+         if(HistorySelectByPosition(ticket)) {
+            for(int d = 0; d < HistoryDealsTotal(); d++) {
+               ulong dealTicket = HistoryDealGetTicket(d);
+               if(dealTicket > 0) {
+                  ENUM_DEAL_ENTRY de = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+                  if(de == DEAL_ENTRY_IN) {
+                     entryVolume += HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+                  }
+               }
+            }
+         }
+
+         // Si le volume actuel est inférieur à 90% du volume d'entrée → partial TP déjà exécuté
+         if(entryVolume > 0 && currentVolume < entryVolume * 0.90) {
+            g_posMgr.SetPartialDone(true);
+            Print("[FIX C-2.1] Partial TP détecté au restart — Entry: ",
+                  DoubleToString(entryVolume, 2), " Current: ", DoubleToString(currentVolume, 2));
+         }
       }
 
       Print("[AUDIT-C5] Resumed management of position #", ticket,

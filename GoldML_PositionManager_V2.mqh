@@ -191,7 +191,10 @@ public:
    double GetCurrentRR() { return m_position.currentRR; }
    double GetProgress() { return m_position.progressToTP; }
    ENUM_POSITION_STATE GetState() { return m_position.state; }
-   
+
+   // FIX C-2.1 (2026-04-03): Setter pour restaurer l'état partial après crash recovery
+   void SetPartialDone(bool done) { m_position.partialDone = done; Print("[PosMgr] SetPartialDone: ", done); }
+
    // Utilities
    void PrintPositionStatus();
    string GetStateText();
@@ -329,10 +332,16 @@ bool CPositionManagerV2::LoadPosition(ulong ticket, string tradeType) {
 //+------------------------------------------------------------------+
 //| Unload Position                                                   |
 //+------------------------------------------------------------------+
+// FIX M-2.1 (2026-04-03): Reset complet des états internes
 void CPositionManagerV2::UnloadPosition() {
    m_hasPosition = false;
    m_position.ticket = 0;
    m_position.state = STATE_NEW;
+   m_position.partialDone = false;
+   m_position.beActivated = false;
+   m_position.trailUpdates = 0;
+   m_trailing.active = false;
+   Print("[PosMgr] Position déchargée — états réinitialisés");
 }
 
 //+------------------------------------------------------------------+
@@ -572,9 +581,15 @@ ENUM_EXIT_REASON CPositionManagerV2::ManagePosition(double currentConviction, bo
    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    // CHECK 1: NEWS PROTECTION
    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   if(newsBlackout && m_position.currentRR >= m_emergencyLockRR) {
-      Print("ðŸ“° News protection - closing with ", DoubleToString(m_position.currentRR, 1), "R profit");
-      ClosePosition("News protection");
+   // FIX M-2.2 (2026-04-03): Fermer en blackout si profit OU si perte > 0.5R
+   // Une position à -0.5R pendant un spike news est dangereuse
+   bool shouldCloseForNews = newsBlackout && (
+      m_position.currentRR >= m_emergencyLockRR ||  // En profit suffisant
+      m_position.currentRR <= -0.5                  // En perte significative (>0.5R)
+   );
+   if(shouldCloseForNews) {
+      Print(“News protection - closing at “, DoubleToString(m_position.currentRR, 1), “R”);
+      ClosePosition(“News protection”);
       return EXIT_NEWS;
    }
    

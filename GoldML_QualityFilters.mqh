@@ -160,7 +160,8 @@ public:
                    bool enableTrendFilter = true);
    
    // Main filter check
-   FilterResult CheckAllFilters(string direction, double entryPrice);
+   // FIX C-6.1 (2026-04-03): timingMode ajouté pour désactiver EMA en POST_NEWS
+   FilterResult CheckAllFilters(string direction, double entryPrice, string timingMode = "CLEAR");
    
    // Individual filters
    bool CheckCooldown();
@@ -600,7 +601,7 @@ bool CQualityFilters::CheckTrendEMA(string direction) {
 //+------------------------------------------------------------------+
 //| Check All Filters                                                 |
 //+------------------------------------------------------------------+
-FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPrice) {
+FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPrice, string timingMode = "CLEAR") {
    FilterResult result;
    result.passed = false;
    result.blockReason = "";
@@ -616,7 +617,13 @@ FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPric
    result.dailyLimitOK = CheckDailyLimits();
    result.sessionOK = CheckSession();
    result.drawdownOK = CheckDrawdown();
-   result.trendOK = CheckTrendEMA(direction);
+   // FIX C-6.1 (2026-04-03): EMA filter désactivé en POST_NEWS
+   // Le mode POST_NEWS est un fade trade (contre-tendance par design)
+   if(timingMode == "POST_NEWS_ENTRY") {
+      result.trendOK = true;  // Fade autorisé — contre-tendance intentionnelle
+   } else {
+      result.trendOK = CheckTrendEMA(direction);
+   }
 
    // Metrics
    result.minutesSinceLastTrade = GetMinutesSinceLastTrade();
