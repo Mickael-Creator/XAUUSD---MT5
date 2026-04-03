@@ -236,7 +236,7 @@ int OnInit() {
    if(!g_filters.Initialize(
          true, 30, 45, 20,     // Cooldown
          true, 0.5, 12,        // Range
-         true, 3, 5, 3,        // Consecutive
+         true, 3, 10, 3,       // Consecutive — FIX M3: maxWins 5->10
          true, 30.0, 5,        // Same level
          true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0, 300.0,
          Enable_Session_Filter, Session_Start, Session_End, false)) {
@@ -927,9 +927,9 @@ void ExecuteTrade(string direction) {
    }
 
    // Calculate TP based on tp_mode
-   double tpRR = 1.5;  // Default
+   double tpRR = 2.0;  // FIX M1 (2026-04-03): NORMAL 1.5->2.0 pour ICT news
    if(g_Signal.tp_mode == "QUICK") tpRR = 1.0;
-   else if(g_Signal.tp_mode == "EXTENDED") tpRR = 2.5;
+   else if(g_Signal.tp_mode == "EXTENDED") tpRR = 3.0;  // FIX M1: 2.5->3.0
 
    double tpPips = slPips * tpRR;
 
