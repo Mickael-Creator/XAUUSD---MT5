@@ -62,7 +62,7 @@ input group "â•â•â• SNIPER ENTRY (SMC M15) â•â•â•"
 input int    Sniper_Swing_Lookback = 24;   // M15: 24 bars = 6 heures
 input int    Sniper_Min_Swing_Bars = 4;    // M15: Plus de stabilitÃ©
 input double Sniper_Fib_Entry_Min = 0.50;
-input double Sniper_Fib_Entry_Max = 0.79;
+input double Sniper_Fib_Entry_Max = 0.786;    // ICT Golden Pocket
 input double Sniper_Fib_Optimal = 0.618;
 input int    Sniper_Max_Bars_After_BOS = 12;  // M15: 12 bars = 3 heures
 input int    Sniper_Max_Bars_After_Sweep = 20; // M15: Plus de temps
