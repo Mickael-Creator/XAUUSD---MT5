@@ -234,11 +234,11 @@ int OnInit() {
    }
    
    if(!g_filters.Initialize(
-         true, 30, 45, 20,     // Cooldown
+         true, 30, 45,          // Cooldown (after loss=45min, after win=0 hardcoded)
          true, 0.5, 12,        // Range
          true, 3, 10, 3,       // Consecutive — FIX M3: maxWins 5->10
          true, 30.0, 5,        // Same level
-         true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0, 300.0,
+         true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0,
          Enable_Session_Filter, Session_Start, Session_End, false)) {
       Print("âŒ Quality Filters initialization failed");
       delete g_filters;

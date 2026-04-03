@@ -62,7 +62,6 @@ private:
    bool     m_enableCooldown;
    int      m_cooldownMinutes;
    int      m_cooldownAfterLoss;
-   int      m_cooldownAfterWin;
    
    // Settings - Range
    bool     m_enableRangeFilter;
@@ -84,7 +83,6 @@ private:
    bool     m_enableDailyLimits;
    int      m_maxDailyTrades;
    double   m_maxDailyLoss;
-   double   m_maxDailyProfit;
    double   m_maxDailyDD;
    
    // Settings - Session
@@ -136,7 +134,6 @@ public:
    bool Initialize(bool enableCooldown = true,
                    int cooldownMinutes = 30,
                    int cooldownAfterLoss = 45,
-                   int cooldownAfterWin = 20,
                    bool enableRange = true,
                    double minRangeATR = 0.5,
                    int rangeLookback = 12,
@@ -150,7 +147,6 @@ public:
                    bool enableDailyLimits = true,
                    int maxDailyTrades = 5,
                    double maxDailyLoss = 400,
-                   double maxDailyProfit = 300,
                    double maxDailyDD = 300,
                    bool enableSession = true,
                    string sessionStart = "08:00",
@@ -232,13 +228,13 @@ CQualityFilters::~CQualityFilters() {
 //| Initialize                                                        |
 //+------------------------------------------------------------------+
 bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
-                                  int cooldownAfterLoss, int cooldownAfterWin,
+                                  int cooldownAfterLoss,
                                   bool enableRange, double minRangeATR, int rangeLookback,
                                   bool enableConsecutive, int maxConsecutiveLosses,
                                   int maxConsecutiveWins, int maxSameDirection,
                                   bool enableSameLevel, double sameLevelPips, int sameLevelLookback,
                                   bool enableDailyLimits, int maxDailyTrades,
-                                  double maxDailyLoss, double maxDailyProfit, double maxDailyDD,
+                                  double maxDailyLoss, double maxDailyDD,
                                   bool enableSession, string sessionStart, string sessionEnd,
                                   bool allowAsian,
                                   bool enableTrendFilter) {
@@ -246,7 +242,6 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
    m_enableCooldown = enableCooldown;
    m_cooldownMinutes = cooldownMinutes;
    m_cooldownAfterLoss = cooldownAfterLoss;
-   m_cooldownAfterWin = cooldownAfterWin;
    
    m_enableRangeFilter = enableRange;
    m_minRangeATR = minRangeATR;
@@ -264,7 +259,6 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
    m_enableDailyLimits = enableDailyLimits;
    m_maxDailyTrades = maxDailyTrades;
    m_maxDailyLoss = maxDailyLoss;
-   m_maxDailyProfit = maxDailyProfit;
    m_maxDailyDD = maxDailyDD;
    
    m_enableSessionFilter = enableSession;
@@ -533,12 +527,6 @@ bool CQualityFilters::CheckDailyLimits() {
       return false;
    }
    
-   // IMPROVE 5 (2026-04-03): Suppression du plafond de gains journalier
-   // Ne pas brider le systeme quand il est en phase avec le marche
-   // Le risque de "rendre les profits" est gere par le trailing stop et le BE
-   // Le DD journalier (4.5%) reste la seule limite de perte
-   // if(m_dailyPnL >= m_maxDailyProfit) { return false; }
-   
    return true;
 }
 
@@ -668,16 +656,12 @@ FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPric
       else if(m_dailyPnL <= -m_maxDailyLoss) {
          result.blockReason = "Max daily loss reached (" + DoubleToString(m_dailyPnL, 0) + ")";
       }
-      // IMPROVE 5: maxDailyProfit supprime — ne plus bloquer sur profit
-      // else if(m_dailyPnL >= m_maxDailyProfit) {
-      //    result.blockReason = "Daily profit target reached";
-      // }
    }
    else if(!result.drawdownOK) {
       result.blockReason = "Max daily drawdown reached (" + DoubleToString(m_dailyMaxDD, 0) + ")";
    }
    else if(!result.cooldownOK) {
-      int required = m_lastTradeWin ? m_cooldownAfterWin : m_cooldownAfterLoss;
+      int required = m_lastTradeWin ? 0 : m_cooldownAfterLoss;
       result.blockReason = "Cooldown active (" + IntegerToString(result.minutesSinceLastTrade) + 
                            "/" + IntegerToString(required) + " min)";
    }
@@ -699,7 +683,7 @@ FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPric
       result.blockReason = "Same level as recent trade";
    }
    else if(!result.trendOK) {
-      result.blockReason = "EMA trend filter: " + direction + " against M15 EMA21/EMA55";
+      result.blockReason = "H4 structure filter: " + direction + " against H4 trend (HH/HL or LH/LL)";
    }
    
    // Check if all passed
