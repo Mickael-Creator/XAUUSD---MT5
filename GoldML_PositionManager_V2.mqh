@@ -588,8 +588,8 @@ ENUM_EXIT_REASON CPositionManagerV2::ManagePosition(double currentConviction, bo
       m_position.currentRR <= -0.5                  // En perte significative (>0.5R)
    );
    if(shouldCloseForNews) {
-      Print(“News protection - closing at “, DoubleToString(m_position.currentRR, 1), “R”);
-      ClosePosition(“News protection”);
+      Print("News protection - closing at ", DoubleToString(m_position.currentRR, 1), "R");
+      ClosePosition("News protection");
       return EXIT_NEWS;
    }
    
