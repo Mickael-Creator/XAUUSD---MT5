@@ -101,6 +101,9 @@ input int    Magic_Number = 888892;
 input double Max_Daily_Loss_EUR = 400.0;
 input double Max_Daily_Trades = 6;
 input double FTMO_Daily_DD_Limit = 4.5;    // % - arrÃªt Ã  4.5% (avant 5%)
+// FIX C3 (2026-04-03): Balance initiale FTMO pour calcul DD total
+input double FTMO_Initial_Balance = 100000.0; // Taille du compte FTMO challenge
+input double FTMO_Total_DD_Limit = 9.0;       // % - arret a 9% (limite FTMO 10%)
 
 //+------------------------------------------------------------------+
 //| SESSION FILTER                                                    |
@@ -797,11 +800,13 @@ void CheckEntry() {
 
    g_LastSniper = g_sniper.AnalyzeEntry(direction, g_Signal.confidence, g_Signal.timing_mode);
 
-   if(!g_LastSniper.isValid) {
-      return;  // No valid entry on M15
-   }
-
+   // FIX C2 (2026-04-03): Utiliser scoreThreshold dynamique au lieu de isValid
+   // Permet au seuil POST_NEWS = 50 de fonctionner reellement
    if(g_LastSniper.score < scoreThreshold) {
+      return;
+   }
+   // Verifier les conditions structurelles ICT independamment du score
+   if(!g_LastSniper.sweep.detected || !g_LastSniper.bos.detected || !g_LastSniper.pullback.inZone) {
       return;
    }
 
@@ -1012,6 +1017,13 @@ void ExecuteTrade(string direction) {
 
       Print("TRADE OPENED - Ticket: ", g_Ticket);
 
+      // FIX C1 (2026-04-03): Charger la position dans le PositionManager
+      // Active le partial TP, breakeven et trailing stop
+      if(g_posMgr != NULL) {
+         g_posMgr.LoadPosition(g_Ticket, g_Signal.timing_mode);
+         Print("PositionManager loaded for ticket: ", g_Ticket);
+      }
+
       if(g_filters != NULL) {
          g_filters.RecordTradeOpen(g_Ticket, direction, entry);
       }
@@ -1180,7 +1192,16 @@ bool CheckFTMOLimits() {
    if(g_TradesToday >= Max_Daily_Trades) {
       return false;
    }
-   
+
+   // FIX C3 (2026-04-03): Verification du drawdown TOTAL FTMO (limite 10%, arret a 9%)
+   if(FTMO_Initial_Balance > 0) {
+      double totalDD = ((FTMO_Initial_Balance - equity) / FTMO_Initial_Balance) * 100.0;
+      if(totalDD >= FTMO_Total_DD_Limit) {
+         Print("FTMO TOTAL DD LIMIT REACHED (", DoubleToString(totalDD, 1), "%) - Trading blocked");
+         return false;
+      }
+   }
+
    return true;
 }
 
