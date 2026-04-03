@@ -196,7 +196,8 @@ private:
    void     DetectSwingPoints();
    ENUM_STRUCTURE AnalyzeStructure(string direction);
    LiquiditySweep DetectLiquiditySweep(string direction);
-   BreakOfStructure DetectBOS(string direction);
+   // FIX ICT-B3: parametre sweepBar pour garantir BOS apres sweep
+   BreakOfStructure DetectBOS(string direction, int sweepBar = -1);
    PullbackZone AnalyzePullback(string direction, BreakOfStructure &bos);
    M5Confirmation CheckM5Confirmation(string direction);
    ENUM_M5_PATTERN DetectM5Pattern(string direction);
@@ -545,8 +546,10 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
          for(int j = 0; j < maxJ; j++) {
             // CORRECTION 11: VÃ©rifier limites array
             if(j >= arraySize) break;
-            
+
             if(m_low_M15[j] < level) {
+               // FIX ICT-S1 (2026-04-03): Support sweep multi-bougies
+               // Methode 1: Same-candle sweep (wick + reclaim sur meme bougie) -- prioritaire
                if(m_close_M15[j] > level) {
                   sweep.detected = true;
                   sweep.sweepLevel = level;
@@ -557,6 +560,22 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
                   sweep.barsSinceSweep = j;
                   sweep.sweepType = "LOW_SWEEP";
                   return sweep;
+               }
+               // Methode 2: Multi-candle sweep (wick bougie j, reclaim bougie j-1 ou j-2)
+               // Le marche perce le niveau puis revient au-dessus dans les 2 bougies suivantes
+               else if(j >= 2 && j - 2 >= 0) {
+                  if(m_close_M15[j-1] > level || m_close_M15[j-2] > level) {
+                     int reclaimBar = (m_close_M15[j-1] > level) ? j-1 : j-2;
+                     sweep.detected = true;
+                     sweep.sweepLevel = level;
+                     sweep.sweepPrice = m_low_M15[j];
+                     sweep.sweepTime = m_time_M15[j];
+                     sweep.sweepBar = j;
+                     sweep.reclaimed = true;
+                     sweep.barsSinceSweep = reclaimBar;
+                     sweep.sweepType = "LOW_SWEEP";
+                     return sweep;
+                  }
                }
             }
          }
@@ -571,8 +590,10 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
          
          for(int j = 0; j < maxJ; j++) {
             if(j >= arraySize) break;
-            
+
             if(m_high_M15[j] > level) {
+               // FIX ICT-S1 (2026-04-03): Support sweep multi-bougies (SELL)
+               // Methode 1: Same-candle sweep -- prioritaire
                if(m_close_M15[j] < level) {
                   sweep.detected = true;
                   sweep.sweepLevel = level;
@@ -583,6 +604,21 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
                   sweep.barsSinceSweep = j;
                   sweep.sweepType = "HIGH_SWEEP";
                   return sweep;
+               }
+               // Methode 2: Multi-candle sweep (wick bougie j, reclaim bougie j-1 ou j-2)
+               else if(j >= 2 && j - 2 >= 0) {
+                  if(m_close_M15[j-1] < level || m_close_M15[j-2] < level) {
+                     int reclaimBar = (m_close_M15[j-1] < level) ? j-1 : j-2;
+                     sweep.detected = true;
+                     sweep.sweepLevel = level;
+                     sweep.sweepPrice = m_high_M15[j];
+                     sweep.sweepTime = m_time_M15[j];
+                     sweep.sweepBar = j;
+                     sweep.reclaimed = true;
+                     sweep.barsSinceSweep = reclaimBar;
+                     sweep.sweepType = "HIGH_SWEEP";
+                     return sweep;
+                  }
                }
             }
          }
@@ -595,7 +631,8 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
 //+------------------------------------------------------------------+
 //| Detect Break of Structure                                        |
 //+------------------------------------------------------------------+
-BreakOfStructure CSniperM15::DetectBOS(string direction) {
+// FIX ICT-B3 (2026-04-03): BOS cherche uniquement apres le sweep (sequence temporelle ICT)
+BreakOfStructure CSniperM15::DetectBOS(string direction, int sweepBar) {
    BreakOfStructure bos;
    bos.detected = false;
    bos.confirmed = false;
@@ -605,21 +642,26 @@ BreakOfStructure CSniperM15::DetectBOS(string direction) {
    bos.bosTime = 0;
    bos.bosBar = -1;
    bos.direction = "NONE";
-   
+
    int arraySize = ArraySize(m_close_M15);
-   
+
    if(direction == "BUY") {
       for(int i = 0; i < ArraySize(m_swingHighs); i++) {
          double level = m_swingHighs[i].price;
          int swingBar = m_swingHighs[i].barIndex;
-         
+
          // CORRECTION 12: Limites correctes
+         // FIX ICT-B3: Si sweepBar fourni, ne chercher le BOS que APRES le sweep (j < sweepBar)
+         // En ICT : Sweep se produit D'ABORD, puis le BOS confirme le retournement
          int maxJ = MathMin(swingBar, m_maxBarsAfterBOS + 5);
-         
-         for(int j = 0; j < maxJ; j++) {
+         if(sweepBar > 0) maxJ = MathMin(maxJ, sweepBar);
+
+         // FIX ICT-B1 (2026-04-03): BOS uniquement sur bougies fermees (j>=1)
+         // j=0 = bougie courante non fermee -> close peut encore changer -> faux signal
+         for(int j = 1; j < maxJ; j++) {
             // CORRECTION 13: VÃ©rifier j+1 existe
             if(j >= arraySize || j + 1 >= arraySize) break;
-            
+
             if(m_close_M15[j] > level && m_close_M15[j + 1] <= level) {
                bos.detected = true;
                bos.bosLevel = level;
@@ -637,12 +679,15 @@ BreakOfStructure CSniperM15::DetectBOS(string direction) {
       for(int i = 0; i < ArraySize(m_swingLows); i++) {
          double level = m_swingLows[i].price;
          int swingBar = m_swingLows[i].barIndex;
-         
+
+         // FIX ICT-B3: Limite temporelle sweep
          int maxJ = MathMin(swingBar, m_maxBarsAfterBOS + 5);
-         
-         for(int j = 0; j < maxJ; j++) {
+         if(sweepBar > 0) maxJ = MathMin(maxJ, sweepBar);
+
+         // FIX ICT-B1 (2026-04-03): BOS uniquement sur bougies fermees (j>=1)
+         for(int j = 1; j < maxJ; j++) {
             if(j >= arraySize || j + 1 >= arraySize) break;
-            
+
             if(m_close_M15[j] < level && m_close_M15[j + 1] >= level) {
                bos.detected = true;
                bos.bosLevel = level;
@@ -657,7 +702,7 @@ BreakOfStructure CSniperM15::DetectBOS(string direction) {
          }
       }
    }
-   
+
    return bos;
 }
 
@@ -988,7 +1033,8 @@ int CSniperM15::CalculateScore(SniperResultM15 &result) {
       if(result.pullback.bosM5) score += 5;
    }
    
-   // OTE Fibonacci bonus (+10 pts if price in 61.8%-78.6% of last swing)
+   // FIX ICT-F1 (2026-04-03): Zone OTE etendue a 50%-78.6% (ICT standard)
+   // Avant : 61.8%-78.6% (trop etroite, ratait les entrees entre 50% et 61.8%)
    if(ArraySize(m_swingHighs) > 0 && ArraySize(m_swingLows) > 0) {
       double swH = m_swingHighs[0].price;
       double swL = m_swingLows[0].price;
@@ -997,14 +1043,14 @@ int CSniperM15::CalculateScore(SniperResultM15 &result) {
          double price = SymbolInfoDouble(m_symbol, SYMBOL_BID);
          if(result.bos.direction == "BULLISH") {
             // BUY: retracement from high down into OTE zone
-            double fibLow  = swH - range * m_fibEntryMax;   // 78.6% retracement
-            double fibHigh = swH - range * m_fibOptimal;    // 61.8% retracement
+            double fibLow  = swH - range * m_fibEntryMax;   // 78.6% retracement -- bas de zone OTE
+            double fibHigh = swH - range * m_fibEntryMin;   // 50% retracement  -- haut de zone OTE
             if(price >= fibLow && price <= fibHigh)
                score += 10;
          } else if(result.bos.direction == "BEARISH") {
             // SELL: retracement from low up into OTE zone
-            double fibLow  = swL + range * m_fibOptimal;   // 61.8% retracement
-            double fibHigh = swL + range * m_fibEntryMax;  // 78.6% retracement
+            double fibLow  = swL + range * m_fibEntryMin;  // 50% retracement  -- bas de zone OTE
+            double fibHigh = swL + range * m_fibEntryMax;  // 78.6% retracement -- haut de zone OTE
             if(price >= fibLow && price <= fibHigh)
                score += 10;
          }
@@ -1124,7 +1170,9 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    }
    
    // Step 3: Detect BOS
-   result.bos = DetectBOS(direction);
+   // FIX ICT-B3: Passer le sweepBar pour garantir BOS apres sweep
+   int sweepBarIndex = result.sweep.detected ? result.sweep.sweepBar : -1;
+   result.bos = DetectBOS(direction, sweepBarIndex);
    
    if(m_requireBOS && !result.bos.detected) {
       result.reason = "No BOS detected";
