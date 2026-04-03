@@ -69,7 +69,7 @@ input int    Sniper_Max_Bars_After_Sweep = 20; // M15: Plus de temps
 input bool   Sniper_Require_Sweep = true;
 input bool   Sniper_Require_BOS = true;
 input double Sniper_Min_RR = 2.0;
-input int    Sniper_Min_Score = 60;        // Post-news = accepte un peu moins
+input int    Sniper_Min_Score = 55;        // Abaissé après recalibrage scoring
 input double Sniper_Max_Spread = 4.5;      // Ã‰largi pour volatilitÃ© news
 input double Sniper_SL_Buffer_Pips = 3.0;  // M15: Buffer plus large
 input double Sniper_SL_Min_Pips = 20.0;    // M15: SL minimum plus large
