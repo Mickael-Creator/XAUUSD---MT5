@@ -193,7 +193,7 @@ int OnInit() {
          Sniper_Max_Bars_After_BOS, Sniper_Max_Bars_After_Sweep,
          Sniper_Require_Sweep, Sniper_Require_BOS,
          Sniper_Min_RR, Sniper_Min_Score, Sniper_Max_Spread,
-         true, 15,  // Session boost
+         true, 10,  // Session boost (max 10 for overlap)
          Sniper_SL_Buffer_Pips, Sniper_SL_Min_Pips, Sniper_SL_Max_Pips,
          Use_M5_Confirmation)) {
       Print("âŒ Sniper M15 initialization failed");
