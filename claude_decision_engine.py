@@ -54,12 +54,11 @@ if not _alert_logger.handlers:
     except Exception:
         pass  # Alert log not writable — non-blocking
 
-SYSTEM_PROMPT = """Analyste quant XAUUSD + ICT sniper. Signal brut + macro/COT/sentiment/géo + bougies M15/M5.
+SYSTEM_PROMPT = """Analyste quant XAUUSD. Signal brut + macro/COT/sentiment/géo.
 Macro enrichi: real_rate=TIPS 10Y yield (FRED DFII10), breakeven_inflation=BEI 10Y (T10YIE), fed_funds_rate=EFFR effectif. Sentiment=gold composite (COT×0.6+VIX_inv×0.4), pas crypto.
-Rôle: 1)Cohérence signal↔macro 2)Risques cachés ET opportunités cachées 3)Ajuster confiance(-20 à +20) 4)Analyse ICT sur M15/M5 5)Contrarian signals: Extreme Fear on gold (sentiment < 20) is HISTORICALLY a strong bullish contrarian signal — factor this in. Real yields falling = bullish gold. BEI rising = bullish gold.
-ICT: Sur M15 chercher sweep de liquidité (prise de high/low) + BOS (break of structure). Sur M5 chercher PD array mitigé (OB=order block ou FVG=fair value gap) dans la zone de pullback. Si bougies absentes, mettre ict_score=0 et sniper_valid=false.
+Rôle: 1)Cohérence signal↔macro 2)Risques cachés ET opportunités cachées 3)Ajuster confiance(-20 à +20) 4)Contrarian signals: Extreme Fear on gold (sentiment < 20) is HISTORICALLY a strong bullish contrarian signal — factor this in. Real yields falling = bullish gold. BEI rising = bullish gold.
 Contexte incrémental: seules les valeurs ayant changé significativement sont incluses. Champs absents=inchangés.
-JSON uniquement:{"confidence_adjustment":<int>,"risk_flags":[<max 3>],"claude_commentary":"<max 150c>","signal_quality":"<STRONG|MODERATE|WEAK>","sniper_valid":<bool>,"ict_score":<0-100>,"ict_sl":<float|0>,"ict_tp":<float|0>,"ict_reason":"<max 80c>"}"""
+JSON uniquement:{"confidence_adjustment":<int>,"risk_flags":[<max 3>],"claude_commentary":"<max 150c>","signal_quality":"<STRONG|MODERATE|WEAK>"}"""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DYNAMIC PROMPT — Threshold-based context filtering
@@ -178,11 +177,6 @@ class ClaudeDecisionEngine:
         enriched["claude_signal_quality"] = cache["signal_quality"]
         enriched["claude_enriched"] = True
         enriched["claude_cached"] = True
-        enriched["sniper_claude_valid"] = cache.get("sniper_claude_valid", False)
-        enriched["ict_score"] = cache.get("ict_score", 0)
-        enriched["ict_sl"] = cache.get("ict_sl", 0.0)
-        enriched["ict_tp"] = cache.get("ict_tp", 0.0)
-        enriched["ict_reason"] = cache.get("ict_reason", "")
         return enriched
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -497,13 +491,6 @@ class ClaudeDecisionEngine:
         enriched["claude_signal_quality"] = claude_result.get("signal_quality", "MODERATE")
         enriched["claude_enriched"] = True
 
-        # ICT sniper fields from Claude
-        enriched["sniper_claude_valid"] = bool(claude_result.get("sniper_valid", False))
-        enriched["ict_score"] = max(0, min(100, int(claude_result.get("ict_score", 0))))
-        enriched["ict_sl"] = float(claude_result.get("ict_sl", 0))
-        enriched["ict_tp"] = float(claude_result.get("ict_tp", 0))
-        enriched["ict_reason"] = str(claude_result.get("ict_reason", ""))[:80]
-
         # Update cost optimization cache
         self._last_claude_cache = {
             "timestamp": time.time(),
@@ -514,17 +501,11 @@ class ClaudeDecisionEngine:
             "risk_flags": enriched["claude_risk_flags"],
             "commentary": enriched["claude_commentary"],
             "signal_quality": enriched["claude_signal_quality"],
-            "sniper_claude_valid": enriched["sniper_claude_valid"],
-            "ict_score": enriched["ict_score"],
-            "ict_sl": enriched["ict_sl"],
-            "ict_tp": enriched["ict_tp"],
-            "ict_reason": enriched["ict_reason"],
         }
 
         logger.info(
             f"🧠 Claude: conf {original_conf}→{new_conf} ({adj:+d}) | "
             f"quality={enriched['claude_signal_quality']} | "
-            f"ict={enriched['ict_score']} sniper={enriched['sniper_claude_valid']} | "
             f"flags={enriched['claude_risk_flags']}"
         )
 
