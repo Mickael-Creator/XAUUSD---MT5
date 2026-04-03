@@ -752,6 +752,13 @@ void CheckEntry() {
    if(direction != "BUY" && direction != "SELL") {
       return;
    }
+
+   //================================================================
+   // STEP 4B: BLACKOUT GATE — reject all entries during news blackout
+   //================================================================
+   if(g_Signal.timing_mode == "BLACKOUT") {
+      return;
+   }
    
    //================================================================
    // STEP 5: QUALITY FILTERS
