@@ -548,6 +548,20 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
             if(j >= arraySize) break;
 
             if(m_low_M15[j] < level) {
+               // IMPROVE 1 (2026-04-03): Filtre volume institutionnel
+               // Un sweep sans volume n'est pas un sweep institutionnel
+               long sweepVolume = (long)iVolume(m_symbol, PERIOD_M15, j);
+               long avgVolume = 0;
+               for(int v = j + 1; v <= j + 10 && v < arraySize; v++) {
+                  avgVolume += (long)iVolume(m_symbol, PERIOD_M15, v);
+               }
+               if(j + 10 < arraySize) avgVolume /= 10;
+               else if(avgVolume > 0) avgVolume /= MathMin(10, arraySize - j - 1);
+               // Le sweep doit avoir un volume >= 80% de la moyenne des 10 bougies precedentes
+               if(avgVolume > 0 && sweepVolume < (long)(avgVolume * 0.80)) {
+                  continue; // Sweep sans volume = bruit, ignorer
+               }
+
                // FIX ICT-S1 (2026-04-03): Support sweep multi-bougies
                // Methode 1: Same-candle sweep (wick + reclaim sur meme bougie) -- prioritaire
                if(m_close_M15[j] > level) {
@@ -592,6 +606,18 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
             if(j >= arraySize) break;
 
             if(m_high_M15[j] > level) {
+               // IMPROVE 1 (2026-04-03): Filtre volume institutionnel (SELL)
+               long sweepVolume = (long)iVolume(m_symbol, PERIOD_M15, j);
+               long avgVolume = 0;
+               for(int v = j + 1; v <= j + 10 && v < arraySize; v++) {
+                  avgVolume += (long)iVolume(m_symbol, PERIOD_M15, v);
+               }
+               if(j + 10 < arraySize) avgVolume /= 10;
+               else if(avgVolume > 0) avgVolume /= MathMin(10, arraySize - j - 1);
+               if(avgVolume > 0 && sweepVolume < (long)(avgVolume * 0.80)) {
+                  continue; // Sweep sans volume = bruit, ignorer
+               }
+
                // FIX ICT-S1 (2026-04-03): Support sweep multi-bougies (SELL)
                // Methode 1: Same-candle sweep -- prioritaire
                if(m_close_M15[j] < level) {
@@ -663,6 +689,20 @@ BreakOfStructure CSniperM15::DetectBOS(string direction, int sweepBar) {
             if(j >= arraySize || j + 1 >= arraySize) break;
 
             if(m_close_M15[j] > level && m_close_M15[j + 1] <= level) {
+               // IMPROVE 1 (2026-04-03): BOS doit avoir un volume significatif
+               // Un BOS sur doji sans volume n'est pas une vraie cassure institutionnelle
+               long bosVolume = (long)iVolume(m_symbol, PERIOD_M15, j);
+               long avgBosVolume = 0;
+               for(int v = j + 1; v <= j + 10 && v < arraySize; v++) {
+                  avgBosVolume += (long)iVolume(m_symbol, PERIOD_M15, v);
+               }
+               if(j + 10 < arraySize) avgBosVolume /= 10;
+               else if(avgBosVolume > 0) avgBosVolume /= MathMin(10, arraySize - j - 1);
+               // BOS doit avoir volume >= 70% de la moyenne (moins strict que sweep)
+               if(avgBosVolume > 0 && bosVolume < (long)(avgBosVolume * 0.70)) {
+                  continue; // BOS sans volume = faux signal, ignorer
+               }
+
                bos.detected = true;
                bos.bosLevel = level;
                bos.bosPrice = m_close_M15[j];
@@ -689,6 +729,18 @@ BreakOfStructure CSniperM15::DetectBOS(string direction, int sweepBar) {
             if(j >= arraySize || j + 1 >= arraySize) break;
 
             if(m_close_M15[j] < level && m_close_M15[j + 1] >= level) {
+               // IMPROVE 1 (2026-04-03): BOS doit avoir un volume significatif (SELL)
+               long bosVolume = (long)iVolume(m_symbol, PERIOD_M15, j);
+               long avgBosVolume = 0;
+               for(int v = j + 1; v <= j + 10 && v < arraySize; v++) {
+                  avgBosVolume += (long)iVolume(m_symbol, PERIOD_M15, v);
+               }
+               if(j + 10 < arraySize) avgBosVolume /= 10;
+               else if(avgBosVolume > 0) avgBosVolume /= MathMin(10, arraySize - j - 1);
+               if(avgBosVolume > 0 && bosVolume < (long)(avgBosVolume * 0.70)) {
+                  continue; // BOS sans volume = faux signal, ignorer
+               }
+
                bos.detected = true;
                bos.bosLevel = level;
                bos.bosPrice = m_close_M15[j];

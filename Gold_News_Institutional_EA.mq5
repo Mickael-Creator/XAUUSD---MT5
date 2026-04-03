@@ -81,7 +81,9 @@ input bool   Use_M5_Confirmation = true;   // Confirmation pattern M5
 //+------------------------------------------------------------------+
 input group "â•â•â• POSITION MANAGEMENT â•â•â•"
 input bool   Enable_Partial_TP = true;
-input double Partial_Percent = 50.0;
+// IMPROVE 6 (2026-04-03): Partial TP a 40% au lieu de 50%
+// Recommandation trader institutionnel : garder plus sur le runner (60% reste)
+input double Partial_Percent = 40.0;
 input double Partial_At_RR = 1.0;
 input bool   Move_To_BE_After_Partial = true;
 input double BE_Buffer_Pips = 2.0;
@@ -111,7 +113,9 @@ input double FTMO_Total_DD_Limit = 9.0;       // % - arret a 9% (limite FTMO 10%
 input group "â•â•â• SESSION â•â•â•"
 input bool   Enable_Session_Filter = true;
 input string Session_Start = "07:00";  // FIX m-10.1 (2026-04-03): Volume XAUUSD significatif après 07:00 GMT
-input string Session_End = "20:00";
+// IMPROVE 7 (2026-04-03): Session fermee a 18:00 GMT
+// La fin de session NY (18:00-20:00 GMT) est trop bruyante et peu fiable
+input string Session_End = "18:00";
 
 //+------------------------------------------------------------------+
 //| DISPLAY                                                           |
@@ -862,13 +866,38 @@ void ExecuteTrade(string direction) {
    Print("   M5 Pattern: ", g_LastSniper.m5Confirm.patternName);
    Print("===========================================================");
 
-   // Execute
+   // IMPROVE 2 (2026-04-03): Retry execution avec deviation croissante
+   // Pendant les news, le slippage peut atteindre 5-15 pips sur XAUUSD
+   // 3 tentatives : 10 pts -> 30 pts -> 50 pts de deviation
    bool success = false;
-   if(direction == "BUY") {
-      success = trade.Buy(lots, _Symbol, entry, sl, tp, comment);
-   } else {
-      success = trade.Sell(lots, _Symbol, entry, sl, tp, comment);
+   int deviations[] = {10, 30, 50};
+
+   for(int attempt = 0; attempt < 3 && !success; attempt++) {
+      trade.SetDeviationInPoints(deviations[attempt]);
+
+      // Rafraichir les prix a chaque tentative
+      double retryAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double retryBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+      if(direction == "BUY") {
+         success = trade.Buy(lots, _Symbol, retryAsk, sl, tp, comment);
+      } else {
+         success = trade.Sell(lots, _Symbol, retryBid, sl, tp, comment);
+      }
+
+      if(!success) {
+         Print("Tentative ", attempt + 1, " echouee (deviation=",
+               deviations[attempt], " pts) : ", trade.ResultRetcode(),
+               " - ", trade.ResultRetcodeDescription());
+         if(attempt < 2) Sleep(500); // Attendre 500ms avant retry
+      } else {
+         Print("Trade execute a la tentative ", attempt + 1,
+               " avec deviation=", deviations[attempt], " pts");
+      }
    }
+
+   // Restaurer la deviation par defaut
+   trade.SetDeviationInPoints(10);
 
    if(success) {
       g_Ticket = trade.ResultOrder();

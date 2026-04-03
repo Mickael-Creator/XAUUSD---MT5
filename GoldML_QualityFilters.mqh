@@ -93,13 +93,11 @@ private:
    string   m_sessionEnd;
    bool     m_allowAsian;
    
-   // Settings - Trend EMA
+   // Settings - Trend (H4 structure)
    bool     m_enableTrendFilter;
 
    // Indicator handles
    int      m_hATR;
-   int      m_hEMA21;
-   int      m_hEMA55;
    
    // State tracking
    datetime m_lastTradeTime;
@@ -127,7 +125,8 @@ private:
    bool     IsSameLevel(double price);
    bool     InTradingSession();
    int      GetMinutesSinceLastTrade();
-   bool     CheckTrendEMA(string direction);
+   // IMPROVE 3 (2026-04-03): Structure H4 au lieu de EMA retail
+   bool     CheckTrendH4(string direction);
    
 public:
    CQualityFilters(string symbol, int magic);
@@ -204,8 +203,6 @@ CQualityFilters::CQualityFilters(string symbol, int magic) {
    m_magic = magic;
    
    m_hATR = INVALID_HANDLE;
-   m_hEMA21 = INVALID_HANDLE;
-   m_hEMA55 = INVALID_HANDLE;
 
    m_lastTradeTime = 0;
    m_lastTradeDirection = "";
@@ -229,8 +226,6 @@ CQualityFilters::CQualityFilters(string symbol, int magic) {
 //+------------------------------------------------------------------+
 CQualityFilters::~CQualityFilters() {
    if(m_hATR != INVALID_HANDLE) IndicatorRelease(m_hATR);
-   if(m_hEMA21 != INVALID_HANDLE) IndicatorRelease(m_hEMA21);
-   if(m_hEMA55 != INVALID_HANDLE) IndicatorRelease(m_hEMA55);
 }
 
 //+------------------------------------------------------------------+
@@ -280,11 +275,9 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
    m_enableTrendFilter = enableTrendFilter;
 
    m_hATR = iATR(m_symbol, PERIOD_M15, 14);
-   m_hEMA21 = iMA(m_symbol, PERIOD_M15, 21, 0, MODE_EMA, PRICE_CLOSE);
-   m_hEMA55 = iMA(m_symbol, PERIOD_M15, 55, 0, MODE_EMA, PRICE_CLOSE);
-   
-   if(m_hATR == INVALID_HANDLE || m_hEMA21 == INVALID_HANDLE || m_hEMA55 == INVALID_HANDLE) {
-      Print("Quality Filters: Failed to create indicators (ATR/EMA21/EMA55)");
+
+   if(m_hATR == INVALID_HANDLE) {
+      Print("Quality Filters: Failed to create ATR indicator");
       return false;
    }
    
@@ -463,12 +456,14 @@ bool CQualityFilters::CheckCooldown() {
    int minutesSince = GetMinutesSinceLastTrade();
    
    int requiredCooldown = m_cooldownMinutes;
-   
-   // Longer cooldown after loss
+
+   // IMPROVE 4 (2026-04-03): Suppression cooldown after win
+   // En tendance forte post-news, le cooldown after win bloque des trades valides
+   // Seul le cooldown after LOSS est conserve pour la protection psychologique
    if(!m_lastTradeWin) {
       requiredCooldown = m_cooldownAfterLoss;
    } else {
-      requiredCooldown = m_cooldownAfterWin;
+      requiredCooldown = 0; // Pas de cooldown apres un trade gagnant
    }
    
    return (minutesSince >= requiredCooldown);
@@ -538,10 +533,11 @@ bool CQualityFilters::CheckDailyLimits() {
       return false;
    }
    
-   // Check max profit (optional - lock in profits)
-   if(m_dailyPnL >= m_maxDailyProfit) {
-      return false;
-   }
+   // IMPROVE 5 (2026-04-03): Suppression du plafond de gains journalier
+   // Ne pas brider le systeme quand il est en phase avec le marche
+   // Le risque de "rendre les profits" est gere par le trailing stop et le BE
+   // Le DD journalier (4.5%) reste la seule limite de perte
+   // if(m_dailyPnL >= m_maxDailyProfit) { return false; }
    
    return true;
 }
@@ -567,32 +563,58 @@ bool CQualityFilters::CheckDrawdown() {
 }
 
 //+------------------------------------------------------------------+
-//| Check Trend EMA  M15 EMA21/EMA55 directional alignment          |
+//| IMPROVE 3 (2026-04-03): Structure HTF H4 au lieu de EMA retail  |
+//| Les institutionnels regardent la structure de marche, pas les MA |
 //+------------------------------------------------------------------+
-bool CQualityFilters::CheckTrendEMA(string direction) {
+bool CQualityFilters::CheckTrendH4(string direction) {
    if(!m_enableTrendFilter) return true;
-   if(m_hEMA21 == INVALID_HANDLE || m_hEMA55 == INVALID_HANDLE) return true;
 
-   double ema21[1], ema55[1];
-   if(CopyBuffer(m_hEMA21, 0, 0, 1, ema21) <= 0) return true;
-   if(CopyBuffer(m_hEMA55, 0, 0, 1, ema55) <= 0) return true;
+   double high[], low[];
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
 
-   double price = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+   // Copier 50 bougies H4 fermees (a partir de la bougie 1)
+   if(CopyHigh(m_symbol, PERIOD_H4, 1, 50, high) < 50) return true; // Defaut permissif
+   if(CopyLow(m_symbol, PERIOD_H4, 1, 50, low) < 50) return true;
 
-   // BUY bloqu si prix < EMA21 ET EMA21 < EMA55 (downtrend confirm)
-   if(direction == "BUY" && price < ema21[0] && ema21[0] < ema55[0]) {
-      Print("Trend filter BLOCK BUY: price=", DoubleToString(price, 2),
-            " < EMA21=", DoubleToString(ema21[0], 2),
-            " < EMA55=", DoubleToString(ema55[0], 2));
-      return false;
+   // Identifier les 3 derniers swing highs et swing lows H4
+   // Swing = bougie dont le high/low est le plus haut/bas parmi les 3 voisins
+   double swingHighs[3], swingLows[3];
+   int shCount = 0, slCount = 0;
+
+   for(int i = 3; i < 47 && (shCount < 3 || slCount < 3); i++) {
+      // Swing High H4
+      if(shCount < 3 &&
+         high[i] > high[i-1] && high[i] > high[i-2] && high[i] > high[i+1] && high[i] > high[i+2]) {
+         swingHighs[shCount++] = high[i];
+      }
+      // Swing Low H4
+      if(slCount < 3 &&
+         low[i] < low[i-1] && low[i] < low[i-2] && low[i] < low[i+1] && low[i] < low[i+2]) {
+         swingLows[slCount++] = low[i];
+      }
    }
 
-   // SELL bloqu si prix > EMA21 ET EMA21 > EMA55 (uptrend confirm)
-   if(direction == "SELL" && price > ema21[0] && ema21[0] > ema55[0]) {
-      Print("Trend filter BLOCK SELL: price=", DoubleToString(price, 2),
-            " > EMA21=", DoubleToString(ema21[0], 2),
-            " > EMA55=", DoubleToString(ema55[0], 2));
-      return false;
+   // Si pas assez de swing points, etre permissif
+   if(shCount < 2 || slCount < 2) return true;
+
+   // Structure haussiere H4 : Higher Highs ET Higher Lows
+   bool h4Bullish = (swingHighs[0] > swingHighs[1] && swingLows[0] > swingLows[1]);
+   // Structure baissiere H4 : Lower Highs ET Lower Lows
+   bool h4Bearish = (swingHighs[0] < swingHighs[1] && swingLows[0] < swingLows[1]);
+
+   if(direction == "BUY") {
+      // Bloquer BUY uniquement si structure H4 explicitement baissiere
+      if(h4Bearish) {
+         Print("H4 structure BLOCK BUY: Lower Highs + Lower Lows on H4");
+         return false;
+      }
+   } else {
+      // Bloquer SELL uniquement si structure H4 explicitement haussiere
+      if(h4Bullish) {
+         Print("H4 structure BLOCK SELL: Higher Highs + Higher Lows on H4");
+         return false;
+      }
    }
 
    return true;
@@ -617,12 +639,12 @@ FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPric
    result.dailyLimitOK = CheckDailyLimits();
    result.sessionOK = CheckSession();
    result.drawdownOK = CheckDrawdown();
-   // FIX C-6.1 (2026-04-03): EMA filter désactivé en POST_NEWS
+   // IMPROVE 3 (2026-04-03): Structure H4 au lieu de EMA retail
    // Le mode POST_NEWS est un fade trade (contre-tendance par design)
    if(timingMode == "POST_NEWS_ENTRY") {
-      result.trendOK = true;  // Fade autorisé — contre-tendance intentionnelle
+      result.trendOK = true;  // Fade autorise — contre-tendance intentionnelle
    } else {
-      result.trendOK = CheckTrendEMA(direction);
+      result.trendOK = CheckTrendH4(direction);
    }
 
    // Metrics
@@ -646,9 +668,10 @@ FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPric
       else if(m_dailyPnL <= -m_maxDailyLoss) {
          result.blockReason = "Max daily loss reached (" + DoubleToString(m_dailyPnL, 0) + ")";
       }
-      else if(m_dailyPnL >= m_maxDailyProfit) {
-         result.blockReason = "Daily profit target reached (" + DoubleToString(m_dailyPnL, 0) + ")";
-      }
+      // IMPROVE 5: maxDailyProfit supprime — ne plus bloquer sur profit
+      // else if(m_dailyPnL >= m_maxDailyProfit) {
+      //    result.blockReason = "Daily profit target reached";
+      // }
    }
    else if(!result.drawdownOK) {
       result.blockReason = "Max daily drawdown reached (" + DoubleToString(m_dailyMaxDD, 0) + ")";
