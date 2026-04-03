@@ -30,7 +30,7 @@ from news_fetcher_v2 import fetch_forex_factory_news as fetch_news_v2
 from news_trading_signal import NewsTradingAnalyzer, create_news_trading_endpoint
 from claude_decision_engine import claude_engine
 # from python_sniper import python_sniper  # DISABLED: ICT moved to EA local (CSniperM15)
-from fred_service import fred_manager, get_tips_yield, get_breakeven_inflation, get_fed_funds_rate
+from fred_service import fred_manager, get_tips_yield, get_breakeven_inflation, get_fed_funds_rate, get_yield_curve_10y2y
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -77,7 +77,7 @@ CONFIG = {
         "gold_price":  {"price": 4390.0,  "source": "fallback"},
         "dxy":         {"dxy_index": 96.1},
         "vix":         {"vix_level": 15.4},
-        "macro":       {"us10y": 4.21, "real_rate": 1.8, "breakeven_inflation": 2.3, "fed_funds_rate": 5.33, "dxy": 96.1, "vix": 15.4, "cot": {}},
+        "macro":       {"us10y": 4.21, "real_rate": 1.8, "breakeven_inflation": 2.3, "fed_funds_rate": 5.33, "yield_curve_10y2y": 0.5, "dxy": 96.1, "vix": 15.4, "cot": {}},
         "cot":         {"percentile": 50.0, "regime": "NEUTRAL", "net_positions": 0},
         "news":        {"events": [], "next_high_impact": None, "time_until_hours": None, "in_blackout": False},
         "sentiment":   {"fear_greed_index": 50, "fear_greed_label": "Neutral", "gold_sentiment_score": 50.0, "source": "fallback"},
@@ -435,6 +435,7 @@ def _fetch_macro() -> dict:
     result["real_rate"]            = get_tips_yield()
     result["breakeven_inflation"]  = get_breakeven_inflation()
     result["fed_funds_rate"]       = get_fed_funds_rate()
+    result["yield_curve_10y2y"]    = get_yield_curve_10y2y()
 
     try:
         r = requests.get(f"{CONFIG['local_api_base']}/dxy_data", timeout=3)
@@ -678,7 +679,7 @@ def _background_refresh_loop():
             if not cache.is_fresh("macro"):
                 data = _fetch_macro()
                 cache.set("macro", data)
-                logger.info(f"📊 Macro: US10Y={data.get('us10y')} RealYield={data.get('real_rate')} BEI={data.get('breakeven_inflation')} FedRate={data.get('fed_funds_rate')} DXY={data.get('dxy')} VIX={data.get('vix')}")
+                logger.info(f"📊 Macro: US10Y={data.get('us10y')} RealYield={data.get('real_rate')} BEI={data.get('breakeven_inflation')} FedRate={data.get('fed_funds_rate')} T10Y2Y={data.get('yield_curve_10y2y')} DXY={data.get('dxy')} VIX={data.get('vix')}")
 
             # === COT — toutes les 1h ===
             if not cache.is_fresh("cot"):

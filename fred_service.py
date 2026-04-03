@@ -6,6 +6,7 @@ Sources:
   - DFII10  → 10-Year Real Yield (TIPS)
   - T10YIE  → 10-Year Breakeven Inflation Rate
   - EFFR    → Effective Federal Funds Rate
+  - T10Y2Y  → 10-Year minus 2-Year Treasury Spread (Yield Curve)
 
 API: FRED (Federal Reserve Economic Data)
 Key: Free at https://fred.stlouisfed.org/docs/api/api_key.html
@@ -48,6 +49,10 @@ FRED_CONFIG = {
         "EFFR": {
             "description": "Effective Federal Funds Rate",
             "fallback": 5.33,
+        },
+        "T10Y2Y": {
+            "description": "10-Year minus 2-Year Treasury Spread (Yield Curve)",
+            "fallback": 0.5,
         },
     },
 }
@@ -150,6 +155,7 @@ class FREDDataManager:
             "real_yield_tips": self.get("DFII10"),
             "breakeven_inflation": self.get("T10YIE"),
             "fed_funds_rate": self.get("EFFR"),
+            "yield_curve_10y2y": self.get("T10Y2Y"),
         }
 
     def status(self) -> dict:
@@ -192,6 +198,11 @@ def get_fed_funds_rate() -> float:
     return fred_manager.get("EFFR")
 
 
+def get_yield_curve_10y2y() -> float:
+    """Get 10-Year minus 2-Year Treasury Spread (Yield Curve)."""
+    return fred_manager.get("T10Y2Y")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # STANDALONE TEST
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -205,5 +216,6 @@ if __name__ == "__main__":
     print(f"\n  Real Yield (TIPS):      {data['real_yield_tips']:.4f}%")
     print(f"  Breakeven Inflation:    {data['breakeven_inflation']:.4f}%")
     print(f"  Fed Funds Rate:         {data['fed_funds_rate']:.4f}%")
+    print(f"  Yield Curve (10Y-2Y):   {data['yield_curve_10y2y']:.4f}%")
 
     print(f"\n  Cache status: {fred_manager.status()}")

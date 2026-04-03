@@ -55,7 +55,8 @@ if not _alert_logger.handlers:
         pass  # Alert log not writable — non-blocking
 
 SYSTEM_PROMPT = """Analyste quant XAUUSD. Signal brut + macro/COT/sentiment/géo.
-Macro enrichi: real_rate=TIPS 10Y yield (FRED DFII10), breakeven_inflation=BEI 10Y (T10YIE), fed_funds_rate=EFFR effectif. Sentiment=gold composite (COT×0.6+VIX_inv×0.4), pas crypto.
+Macro enrichi: real_rate=TIPS 10Y yield (FRED DFII10), breakeven_inflation=BEI 10Y (T10YIE), fed_funds_rate=EFFR effectif, yield_curve_10y2y=spread 10Y-2Y (T10Y2Y). Sentiment=gold composite (COT×0.6+VIX_inv×0.4), pas crypto.
+yield_curve_spread (10Y-2Y): Négatif (inversé)=récession anticipée=bullish gold safe haven. Positif et montant=reprise=neutre gold. Très positif >1%=reflation=bullish gold.
 Rôle: 1)Cohérence signal↔macro 2)Risques cachés ET opportunités cachées 3)Ajuster confiance(-20 à +20) 4)Contrarian signals: Extreme Fear on gold (sentiment < 20) is HISTORICALLY a strong bullish contrarian signal — factor this in. Real yields falling = bullish gold. BEI rising = bullish gold.
 Contexte incrémental: seules les valeurs ayant changé significativement sont incluses. Champs absents=inchangés.
 JSON uniquement:{"confidence_adjustment":<int>,"risk_flags":[<max 3>],"claude_commentary":"<max 150c>","signal_quality":"<STRONG|MODERATE|WEAK>"}"""
@@ -72,6 +73,7 @@ CHANGE_THRESHOLDS = {
     "macro.real_rate": 0.1,
     "macro.breakeven_inflation": 0.05,
     "macro.fed_funds_rate": 0.1,
+    "macro.yield_curve_10y2y": 0.1,
     "sentiment.fear_greed_index": 5,
     "sentiment.gold_sentiment_score": 5,
 }
