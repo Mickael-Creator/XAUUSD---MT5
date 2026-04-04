@@ -1137,10 +1137,15 @@ int CSniperM15::CalculateScore(SniperResultM15 &result) {
       score += 20;
    }
    
-   // Liquidity sweep (30 pts — pillar #1 ICT)
+   // Liquidity sweep (30 pts - pillar #1 ICT)
+   // FIX A1 (2026-04-04): BOS Direct bypass = demi-score sweep
    if(result.sweep.detected && result.sweep.reclaimed) {
-      score += 30;
-      if(result.sweep.barsSinceSweep <= 5) score += 5;
+      if(result.sweep.sweepType == "BOS_DIRECT_BYPASS") {
+         score += 15;  // 15 pts au lieu de 30 pour sweep virtuel
+      } else {
+         score += 30;
+         if(result.sweep.barsSinceSweep <= 5) score += 5;
+      }
    }
    
    // BOS (20 pts — pillar #2, secondary to sweep)

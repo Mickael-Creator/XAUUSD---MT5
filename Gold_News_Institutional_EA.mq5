@@ -192,6 +192,11 @@ datetime g_DayStart = 0;
 double g_DayStartBalance = 0;  // FIX C-9.1 (2026-04-03): Balance début de journée FTMO
 int g_TradesToday = 0;
 int g_LocalTradesToday = 0;  // Compteur trades en mode local
+
+// FIX A3+A4 (2026-04-04): Handles locaux caches (OnInit au lieu de chaque tick)
+int g_hLocalEMA20 = INVALID_HANDLE;
+int g_hLocalEMA50 = INVALID_HANDLE;
+int g_hLocalATR   = INVALID_HANDLE;
 double g_DailyPnL = 0;
 
 // Sniper result cache
@@ -296,6 +301,16 @@ int OnInit() {
    g_DayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
    g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);  // FIX C-9.1
    
+   // FIX A3+A4: Handles locaux crees une fois dans OnInit
+   g_hLocalEMA20 = iMA(_Symbol, PERIOD_M15, 20, 0, MODE_EMA, PRICE_CLOSE);
+   g_hLocalEMA50 = iMA(_Symbol, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
+   g_hLocalATR   = iATR(_Symbol, PERIOD_M15, 14);
+   if(g_hLocalEMA20 == INVALID_HANDLE || g_hLocalEMA50 == INVALID_HANDLE ||
+      g_hLocalATR == INVALID_HANDLE)
+      Print("WARNING: Local signal handles invalides");
+   else
+      Print("Local signal handles initialises");
+   
    Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
    Print("   READY - Waiting for signals...");
    Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
@@ -316,6 +331,11 @@ int OnInit() {
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
    EventKillTimer();
+   
+   // FIX A3+A4: Release handles locaux
+   if(g_hLocalEMA20 != INVALID_HANDLE) { IndicatorRelease(g_hLocalEMA20); g_hLocalEMA20 = INVALID_HANDLE; }
+   if(g_hLocalEMA50 != INVALID_HANDLE) { IndicatorRelease(g_hLocalEMA50); g_hLocalEMA50 = INVALID_HANDLE; }
+   if(g_hLocalATR   != INVALID_HANDLE) { IndicatorRelease(g_hLocalATR);   g_hLocalATR   = INVALID_HANDLE; }
    
    // CORRECTION 6: Cleanup sÃ©curisÃ©
    if(g_sniper != NULL) {
@@ -752,18 +772,14 @@ LocalSignal GetLocalSignal() {
       else return local;
    }
 
-   // === 2. EMA M15 (25 pts max) ===
-   double ema20[], ema50[];
-   ArraySetAsSeries(ema20, true);
-   ArraySetAsSeries(ema50, true);
-
-   int hEMA20 = iMA(_Symbol, PERIOD_M15, 20, 0, MODE_EMA, PRICE_CLOSE);
-   int hEMA50 = iMA(_Symbol, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
-
+   // === 2. EMA M15 (25 pts max) - FIX A3+A4: handles globaux ===
    double emaScore = 0;
-   if(hEMA20 != INVALID_HANDLE && hEMA50 != INVALID_HANDLE) {
-      if(CopyBuffer(hEMA20, 0, 0, 3, ema20) >= 3 &&
-         CopyBuffer(hEMA50, 0, 0, 3, ema50) >= 3) {
+   if(g_hLocalEMA20 != INVALID_HANDLE && g_hLocalEMA50 != INVALID_HANDLE) {
+      double ema20[], ema50[];
+      ArraySetAsSeries(ema20, true);
+      ArraySetAsSeries(ema50, true);
+      if(CopyBuffer(g_hLocalEMA20, 0, 0, 3, ema20) >= 3 &&
+         CopyBuffer(g_hLocalEMA50, 0, 0, 3, ema50) >= 3) {
 
          double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
@@ -772,8 +788,6 @@ LocalSignal GetLocalSignal() {
          else if(h4Dir == "BUY"  && price > ema50[0]) emaScore = 10;
          else if(h4Dir == "SELL" && price < ema50[0]) emaScore = 10;
       }
-      IndicatorRelease(hEMA20);
-      IndicatorRelease(hEMA50);
    }
 
    // === 3. SESSION (15 pts max) ===
@@ -788,13 +802,12 @@ LocalSignal GetLocalSignal() {
    else if(hour >= 14 && hour < 17) sessionScore = 10;
    else                              sessionScore = 3;
 
-   // === 4. VOLATILITE ATR M15 (10 pts max) ===
-   int hATR = iATR(_Symbol, PERIOD_M15, 14);
+   // === 4. VOLATILITE ATR M15 (10 pts max) - FIX A3+A4: handle global ===
    double atrScore = 0;
-   if(hATR != INVALID_HANDLE) {
+   if(g_hLocalATR != INVALID_HANDLE) {
       double atr[];
       ArraySetAsSeries(atr, true);
-      if(CopyBuffer(hATR, 0, 0, 3, atr) >= 3) {
+      if(CopyBuffer(g_hLocalATR, 0, 0, 3, atr) >= 3) {
          double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
          if(pt <= 0) pt = 0.01;
          double atrPips = atr[0] / (pt * 10);
@@ -803,7 +816,6 @@ LocalSignal GetLocalSignal() {
          else if(atrPips >= 10) atrScore = 4;
          else                   atrScore = 0;
       }
-      IndicatorRelease(hATR);
    }
 
    // === 5. API BIAS RESIDUEL (10 pts max) ===
@@ -944,12 +956,13 @@ void CheckEntry() {
    g_LastSniper = g_sniper.AnalyzeEntry(direction, confidence, timingMode);
 
    if(g_LastSniper.score < scoreThreshold) return;
-   // SETUP-A/C: sweep non requis pour BOS Direct et London Range
+   // OPTIM-1+2 (2026-04-04): Gates adaptes par source de signal
    bool sweepRequired = (signalSource != "LONDON_RANGE");
+   // OPTIM-2: Mode Local haute confidence (>=65%) : sweep non requis
+   if(signalSource == "LOCAL" && confidence >= 65.0) sweepRequired = false;
    if(sweepRequired && !g_LastSniper.sweep.detected) return;
-   if(!g_LastSniper.bos.detected) return;
-   // FIX SETUP-C (2026-04-04): London Range n'exige pas pullback.inZone strict
-   // Le breakout de range est lui-meme la confirmation d'entree
+   // OPTIM-1: London Range n'exige pas BOS ni pullback stricts
+   if(signalSource != "LONDON_RANGE" && !g_LastSniper.bos.detected) return;
    if(signalSource != "LONDON_RANGE" && !g_LastSniper.pullback.inZone) return;
 
    // Log

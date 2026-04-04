@@ -605,9 +605,12 @@ ENUM_EXIT_REASON CPositionManagerV2::ManagePosition(double currentConviction, bo
    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    // CHECK 3: MAX BARS OPEN
    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   if(m_position.barsOpen > m_maxBarsOpen && m_position.currentRR >= 0) {
-      Print("â° Max time reached (", m_position.barsOpen, " bars) - closing");
-      ClosePosition("Time exit");
+   // FIX A2 (2026-04-04): Fermer aussi les positions en perte apres maxBarsOpen
+   // Une position bloquee >16h en perte est dangereuse pour FTMO DD
+   if(m_position.barsOpen > m_maxBarsOpen) {
+      Print("[PM] Max bars atteint (", m_position.barsOpen,
+            ") RR=", DoubleToString(m_position.currentRR, 2), "R - fermeture forcee");
+      ClosePosition("Time exit - max bars");
       return EXIT_TIME;
    }
    
