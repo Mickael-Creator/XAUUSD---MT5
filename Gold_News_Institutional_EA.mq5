@@ -643,11 +643,14 @@ LondonRangeSignal DetectLondonRangeSetup() {
    setup.rangeLow = 0;
    setup.breakLevel = 0;
 
+   // FIX TIMEZONE (2026-04-04): Utiliser TimeGMT() au lieu de TimeCurrent()
+   // TimeCurrent() retourne l'heure du serveur MT5 (UTC+2 ou UTC+3 chez FTMO)
+   // TimeGMT() retourne l'heure GMT reelle, independante du broker
    MqlDateTime dt;
-   TimeCurrent(dt);
+   TimeGMT(dt);
    int hour = dt.hour;
 
-   // Fenetre d'entree : 09:00-11:00 GMT seulement
+   // Fenetre d'entree : 09:00-11:00 GMT (TimeGMT)
    if(hour < 9 || hour >= 11) return setup;
 
    double high[], low[], close[];
@@ -666,10 +669,17 @@ LondonRangeSignal DetectLondonRangeSetup() {
    double rangeHigh = 0, rangeLow = 999999;
    int rangeCount = 0;
 
+   // FIX TIMEZONE: Calculer l'offset serveur→GMT une seule fois
+   int serverGMTOffset = (int)((TimeCurrent() - TimeGMT()) / 3600);
+
    for(int i = 1; i < bars; i++) {
       MqlDateTime bdt;
       TimeToStruct(times[i], bdt);
-      if(bdt.hour >= 7 && bdt.hour < 9) {
+      // Convertir heure serveur en GMT
+      int gmtHour = bdt.hour - serverGMTOffset;
+      if(gmtHour < 0) gmtHour += 24;
+      if(gmtHour >= 24) gmtHour -= 24;
+      if(gmtHour >= 7 && gmtHour < 9) {
          if(high[i] > rangeHigh) rangeHigh = high[i];
          if(low[i]  < rangeLow)  rangeLow  = low[i];
          rangeCount++;
