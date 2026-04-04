@@ -672,8 +672,13 @@ bool CPositionManagerV2::ExecutePartialTP() {
    double remainingLots = m_position.currentLots - lotsToClose;
    
    if(remainingLots < minLot) {
-      Print("âš ï¸ Position too small for partial TP");
-      m_position.partialDone = true;
+      // FIX PARTIAL-BUG (2026-04-04): Ne PAS mettre partialDone=true si le partial n'a pas eu lieu
+      // Avant: partialDone=true ici lancait le trailing sans filet de securite
+      // Maintenant: partialDone reste false, breakeven et trailing ne se lanceront pas
+      Print("[PARTIAL-BUG] Position trop petite pour partial TP (",
+            DoubleToString(m_position.currentLots, 2), " lots, min=",
+            DoubleToString(minLot, 2), ") - partialDone reste false");
+      // m_position.partialDone = true;  // SUPPRIME: causait trailing sans partial reel
       return false;
    }
    
