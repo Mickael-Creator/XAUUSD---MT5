@@ -947,7 +947,10 @@ void CheckEntry() {
    // SETUP-A/C: sweep non requis pour BOS Direct et London Range
    bool sweepRequired = (signalSource != "LONDON_RANGE");
    if(sweepRequired && !g_LastSniper.sweep.detected) return;
-   if(!g_LastSniper.bos.detected || !g_LastSniper.pullback.inZone) return;
+   if(!g_LastSniper.bos.detected) return;
+   // FIX SETUP-C (2026-04-04): London Range n'exige pas pullback.inZone strict
+   // Le breakout de range est lui-meme la confirmation d'entree
+   if(signalSource != "LONDON_RANGE" && !g_LastSniper.pullback.inZone) return;
 
    // Log
    Print("======================================================");
@@ -988,8 +991,9 @@ void CheckEntry() {
    g_Signal.tp_mode     = savedTpMode;
    g_Signal.wider_stops = savedWiderStops;
 
-   // Incrementer compteur local si trade local
-   if(signalSource == "LOCAL" || signalSource == "LONDON_RANGE") g_LocalTradesToday++;
+   // FIX LOCAL-COUNT (2026-04-04): Incrementer seulement si trade reellement ouvert
+   if((signalSource == "LOCAL" || signalSource == "LONDON_RANGE") && g_InPosition)
+      g_LocalTradesToday++;
 }
 
 //+------------------------------------------------------------------+

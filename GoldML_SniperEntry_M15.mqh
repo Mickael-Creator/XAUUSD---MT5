@@ -1287,8 +1287,14 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
       bool h4Strong = CheckH4Structure(direction);
       if(highConfidence && h4Strong) {
          allowBOSDirect = true;
+         // FIX SETUP-A (2026-04-04): Marquer le sweep comme valide par BOS Direct
+         // Le gate EA verifie sweep.detected, on le met a true avec type special
+         result.sweep.detected = true;
+         result.sweep.sweepType = "BOS_DIRECT_BYPASS";
+         result.sweep.reclaimed = true;
+         result.sweep.barsSinceSweep = 0;
          Print("[SETUP-A] BOS Direct active: confidence=", DoubleToString(confidence, 0),
-               "% H4 forte -> sweep non requis");
+               "% H4 forte -> sweep marque comme valide");
       }
    }
 
