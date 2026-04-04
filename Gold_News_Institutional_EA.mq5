@@ -117,6 +117,16 @@ input string Session_Start = "07:00";  // FIX m-10.1 (2026-04-03): Volume XAUUSD
 // La fin de session NY (18:00-20:00 GMT) est trop bruyante et peu fiable
 input string Session_End = "18:00";
 
+
+//+------------------------------------------------------------------+
+//| LOCAL MODE (Trading autonome quand API silencieuse)               |
+//+------------------------------------------------------------------+
+input group "=== LOCAL MODE ==="
+input bool   Enable_Local_Mode        = true;   // Activer mode local quand API silencieuse
+input double Local_Min_Confidence     = 55.0;   // Confidence minimum en mode local (0-100)
+input double Local_Size_Factor        = 0.7;    // Taille position reduite en mode local
+input int    Local_Max_Daily_Trades   = 3;      // Max trades locaux par jour
+
 //+------------------------------------------------------------------+
 //| DISPLAY                                                           |
 //+------------------------------------------------------------------+
@@ -142,6 +152,16 @@ struct NewsSignal {
    // CLEANUP (2026-04-03): sniper_* supprimés — champs jamais alimentés par l'API VPS
 };
 
+
+//+------------------------------------------------------------------+
+//| LOCAL SIGNAL STRUCTURE (calculated locally when API silent)       |
+//+------------------------------------------------------------------+
+struct LocalSignal {
+   string   direction;    // BUY / SELL / NONE
+   double   confidence;   // 0-100
+   string   source;       // Always "LOCAL"
+};
+
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                  |
 //+------------------------------------------------------------------+
@@ -158,6 +178,7 @@ string g_CurrentDirection = "";
 datetime g_DayStart = 0;
 double g_DayStartBalance = 0;  // FIX C-9.1 (2026-04-03): Balance début de journée FTMO
 int g_TradesToday = 0;
+int g_LocalTradesToday = 0;  // Compteur trades en mode local
 double g_DailyPnL = 0;
 
 // Sniper result cache
@@ -328,6 +349,7 @@ void OnTick() {
       Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• NEW TRADING DAY â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
       g_DayStart = today;
       g_TradesToday = 0;
+      g_LocalTradesToday = 0;
       g_DailyPnL = 0;
       g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);  // FIX C-9.1
       Print("📅 Nouveau jour FTMO — Balance de référence: ", DoubleToString(g_DayStartBalance, 2));
@@ -576,119 +598,277 @@ bool ParseSignalJSON(string json) {
 }
 
 //+------------------------------------------------------------------+
-//| CHECK ENTRY CONDITIONS                                            |
+//| GET LOCAL SIGNAL (H4 Structure + EMA M15 + Session + ATR)         |
+//| Calcule direction et confidence localement quand API silencieuse  |
+//+------------------------------------------------------------------+
+LocalSignal GetLocalSignal() {
+   LocalSignal local;
+   local.direction  = "NONE";
+   local.confidence = 0;
+   local.source     = "LOCAL";
+
+   // === 1. STRUCTURE H4 (40 pts max) ===
+   double h4High[], h4Low[];
+   ArraySetAsSeries(h4High, true);
+   ArraySetAsSeries(h4Low, true);
+
+   if(CopyHigh(_Symbol, PERIOD_H4, 1, 50, h4High) < 50) return local;
+   if(CopyLow(_Symbol,  PERIOD_H4, 1, 50, h4Low)  < 50) return local;
+
+   double swH[3], swL[3];
+   int shC = 0, slC = 0;
+
+   for(int i = 3; i < 47 && (shC < 3 || slC < 3); i++) {
+      if(shC < 3 &&
+         h4High[i] > h4High[i-1] && h4High[i] > h4High[i-2] &&
+         h4High[i] > h4High[i+1] && h4High[i] > h4High[i+2])
+         swH[shC++] = h4High[i];
+
+      if(slC < 3 &&
+         h4Low[i] < h4Low[i-1] && h4Low[i] < h4Low[i-2] &&
+         h4Low[i] < h4Low[i+1] && h4Low[i] < h4Low[i+2])
+         swL[slC++] = h4Low[i];
+   }
+
+   if(shC < 2 || slC < 2) return local;
+
+   bool h4Bullish = (swH[0] > swH[1] && swL[0] > swL[1]);
+   bool h4Bearish = (swH[0] < swH[1] && swL[0] < swL[1]);
+
+   double h4Score = 0;
+   string h4Dir   = "NONE";
+
+   if(h4Bullish)      { h4Dir = "BUY";  h4Score = 40; }
+   else if(h4Bearish) { h4Dir = "SELL"; h4Score = 40; }
+   else {
+      if(swH[0] > swH[1])      { h4Dir = "BUY";  h4Score = 15; }
+      else if(swL[0] < swL[1]) { h4Dir = "SELL"; h4Score = 15; }
+      else return local;
+   }
+
+   // === 2. EMA M15 (25 pts max) ===
+   double ema20[], ema50[];
+   ArraySetAsSeries(ema20, true);
+   ArraySetAsSeries(ema50, true);
+
+   int hEMA20 = iMA(_Symbol, PERIOD_M15, 20, 0, MODE_EMA, PRICE_CLOSE);
+   int hEMA50 = iMA(_Symbol, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
+
+   double emaScore = 0;
+   if(hEMA20 != INVALID_HANDLE && hEMA50 != INVALID_HANDLE) {
+      if(CopyBuffer(hEMA20, 0, 0, 3, ema20) >= 3 &&
+         CopyBuffer(hEMA50, 0, 0, 3, ema50) >= 3) {
+
+         double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+         if(h4Dir == "BUY"  && price > ema20[0] && ema20[0] > ema50[0]) emaScore = 25;
+         else if(h4Dir == "SELL" && price < ema20[0] && ema20[0] < ema50[0]) emaScore = 25;
+         else if(h4Dir == "BUY"  && price > ema50[0]) emaScore = 10;
+         else if(h4Dir == "SELL" && price < ema50[0]) emaScore = 10;
+      }
+      IndicatorRelease(hEMA20);
+      IndicatorRelease(hEMA50);
+   }
+
+   // === 3. SESSION (15 pts max) ===
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   int hour = dt.hour;
+
+   double sessionScore = 0;
+   if(hour >= 12 && hour < 14)      sessionScore = 15;
+   else if(hour >= 7  && hour < 9)  sessionScore = 12;
+   else if(hour >= 9  && hour < 12) sessionScore = 10;
+   else if(hour >= 14 && hour < 17) sessionScore = 10;
+   else                              sessionScore = 3;
+
+   // === 4. VOLATILITE ATR M15 (10 pts max) ===
+   int hATR = iATR(_Symbol, PERIOD_M15, 14);
+   double atrScore = 0;
+   if(hATR != INVALID_HANDLE) {
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(hATR, 0, 0, 3, atr) >= 3) {
+         double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+         if(pt <= 0) pt = 0.01;
+         double atrPips = atr[0] / (pt * 10);
+         if(atrPips >= 20)      atrScore = 10;
+         else if(atrPips >= 15) atrScore = 7;
+         else if(atrPips >= 10) atrScore = 4;
+         else                   atrScore = 0;
+      }
+      IndicatorRelease(hATR);
+   }
+
+   // === 5. API BIAS RESIDUEL (10 pts max) ===
+   double apiBoost = 0;
+   if(g_Signal.is_valid) {
+      if(g_Signal.bias == "BULLISH" && h4Dir == "BUY")        apiBoost = 10;
+      else if(g_Signal.bias == "BEARISH" && h4Dir == "SELL")   apiBoost = 10;
+      else if(g_Signal.bias != "NEUTRAL")                      apiBoost = 5;
+      if(g_Signal.confidence >= 40 && g_Signal.confidence < 60) apiBoost += 5;
+      if(apiBoost > 10) apiBoost = 10;
+   }
+
+   // === TOTAL: h4(40) + ema(25) + session(15) + atr(10) + api(10) = 100 max ===
+   double total = h4Score + emaScore + sessionScore + atrScore + apiBoost;
+
+   local.direction  = h4Dir;
+   local.confidence = MathMin(100.0, total);
+
+   Print("[LOCAL] H4:", h4Score, " EMA:", emaScore,
+         " Ses:", sessionScore, " ATR:", atrScore,
+         " API:", apiBoost, " = ", DoubleToString(local.confidence, 0),
+         "% Dir:", local.direction);
+
+   return local;
+}
+
+//+------------------------------------------------------------------+
+//| CHECK ENTRY CONDITIONS (Dual-mode: API + Local)                   |
 //+------------------------------------------------------------------+
 void CheckEntry() {
-   // CORRECTION 16: Validation signal
-   if(!g_Signal.is_valid) {
-      return;
-   }
-   
-   // CORRECTION 17: Check signal age (ne pas trader sur vieux signal)
-   if((TimeCurrent() - g_Signal.last_update) > 300) {  // 5 minutes
-      static datetime lastWarning = 0;
-      if(TimeCurrent() - lastWarning > 600) {
-         Print("âš ï¸ Signal too old (", (TimeCurrent() - g_Signal.last_update), "s)");
-         lastWarning = TimeCurrent();
-      }
-      return;
-   }
-   
-   //================================================================
-   // STEP 1: TIMING MODE GATE — FIX m-11.3 (2026-04-03): Check BLACKOUT centralisé
-   //================================================================
 
-   // BLACKOUT = NEVER TRADE
-   if(g_Signal.timing_mode == "BLACKOUT") {
-      return;  // Hard stop
-   }
+   // === DETERMINER LA SOURCE DU SIGNAL ===
+   string direction;
+   double confidence;
+   string signalSource;
+   string timingMode;
+   double sizeFactor;
+   string tpMode;
+   bool   widerStops;
 
-   // PRE_NEWS_SETUP = Trade only if allowed and aligned
-   if(g_Signal.timing_mode == "PRE_NEWS_SETUP" && !Allow_PreNews_Trading) {
+   // PRIORITE 1 : Signal API fort (comportement identique a l'actuel)
+   bool apiHasSignal = (g_Signal.is_valid &&
+                        g_Signal.confidence >= Min_Confidence &&
+                        (g_Signal.direction == "BUY" || g_Signal.direction == "SELL") &&
+                        g_Signal.timing_mode != "BLACKOUT" &&
+                        (TimeCurrent() - g_Signal.last_update) <= 300);
+
+   if(apiHasSignal) {
+      direction    = g_Signal.direction;
+      confidence   = g_Signal.confidence;
+      signalSource = "API";
+      timingMode   = g_Signal.timing_mode;
+      sizeFactor   = g_Signal.size_factor;
+      tpMode       = g_Signal.tp_mode;
+      widerStops   = g_Signal.wider_stops;
+   }
+   // PRIORITE 2 : Mode local (quand API silencieuse, timing CLEAR)
+   else if(Enable_Local_Mode) {
+      // Bloquer si BLACKOUT API (meme sans signal fort)
+      if(g_Signal.is_valid && g_Signal.timing_mode == "BLACKOUT") return;
+
+      // Limiter les trades locaux journaliers
+      if(g_LocalTradesToday >= Local_Max_Daily_Trades) return;
+
+      LocalSignal local = GetLocalSignal();
+
+      if(local.direction == "NONE" || local.confidence < Local_Min_Confidence) return;
+
+      direction    = local.direction;
+      confidence   = local.confidence;
+      signalSource = "LOCAL";
+      timingMode   = "CLEAR";
+      sizeFactor   = Local_Size_Factor;
+      tpMode       = "NORMAL";
+      widerStops   = false;
+   }
+   else {
       return;
    }
 
-   // POST_NEWS_ENTRY = This is THE opportunity (fade the spike)
-   if(g_Signal.timing_mode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade) {
-      return;
-   }
+   //================================================================
+   // TIMING MODE GATE
+   //================================================================
+   if(timingMode == "BLACKOUT") return;
+   if(timingMode == "PRE_NEWS_SETUP"  && !Allow_PreNews_Trading) return;
+   if(timingMode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade)   return;
 
    //================================================================
-   // STEP 2: CONFIDENCE GATE
+   // CONFIDENCE GATE (API uniquement)
    //================================================================
-   if(g_Signal.confidence < Min_Confidence) {
-      return;
-   }
+   if(signalSource == "API" && confidence < Min_Confidence) return;
 
    //================================================================
-   // STEP 3: DIRECTION GATE
+   // DIRECTION GATE
    //================================================================
-   string direction = g_Signal.direction;
-   if(direction != "BUY" && direction != "SELL") {
-      return;
-   }
-   
+   if(direction != "BUY" && direction != "SELL") return;
+
    //================================================================
-   // STEP 5: QUALITY FILTERS
+   // QUALITY FILTERS
    //================================================================
    if(g_filters != NULL) {
-      // Use ASK for BUY entries, BID for SELL entries — filters must evaluate
-      // against the actual entry price, not always BID (avoids spread-induced asymmetry)
       double price = (direction == "BUY")
                      ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                      : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      FilterResult fr = g_filters.CheckAllFilters(direction, price, g_Signal.timing_mode);  // FIX C-6.1
+
+      FilterResult fr = g_filters.CheckAllFilters(direction, price, timingMode);
       if(!fr.passed) {
-         // Log silencieux sauf premiÃ¨re fois
          static string lastReason = "";
          if(fr.blockReason != lastReason) {
-            Print("ðŸš« Filter blocked: ", fr.blockReason);
+            Print("[", signalSource, "] Filter blocked: ", fr.blockReason);
             lastReason = fr.blockReason;
          }
          return;
       }
    }
-   
-   //================================================================
-   // STEP 6: SNIPER M15 ENTRY (Find precise entry point)
-   //================================================================
-   if(g_sniper == NULL) {
-      Print("CheckEntry: Sniper is NULL");
-      return;
-   }
 
-   // Adjust score threshold based on timing mode
+   //================================================================
+   // SNIPER M15 ENTRY
+   //================================================================
+   if(g_sniper == NULL) return;
+
    int scoreThreshold = Sniper_Min_Score;
-   if(g_Signal.timing_mode == "POST_NEWS_ENTRY") {
-      scoreThreshold = 50;  // Lower for fade opportunities
-   }
+   if(timingMode   == "POST_NEWS_ENTRY") scoreThreshold = 50;
+   if(signalSource == "LOCAL")           scoreThreshold = 60;
 
-   g_LastSniper = g_sniper.AnalyzeEntry(direction, g_Signal.confidence, g_Signal.timing_mode);
+   g_LastSniper = g_sniper.AnalyzeEntry(direction, confidence, timingMode);
 
-   // FIX C2 (2026-04-03): Utiliser scoreThreshold dynamique au lieu de isValid
-   // Permet au seuil POST_NEWS = 50 de fonctionner reellement
-   if(g_LastSniper.score < scoreThreshold) {
-      return;
-   }
-   // Verifier les conditions structurelles ICT independamment du score
-   if(!g_LastSniper.sweep.detected || !g_LastSniper.bos.detected || !g_LastSniper.pullback.inZone) {
-      return;
-   }
+   if(g_LastSniper.score < scoreThreshold) return;
+   if(!g_LastSniper.sweep.detected || !g_LastSniper.bos.detected || !g_LastSniper.pullback.inZone) return;
 
-   // Log sniper analysis
-   Print("SNIPER M15 VALIDATED:");
-   Print("   Score: ", g_LastSniper.score);
-   Print("   Sweep: ", g_LastSniper.sweep.detected ? "YES" : "NO");
-   Print("   BOS: ", g_LastSniper.bos.detected ? g_LastSniper.bos.direction : "NONE");
-   Print("   PD: ", g_LastSniper.pullback.pdType,
-         " | Mitigated: ", g_LastSniper.pullback.mitigated ? "YES" : "NO",
-         " | CHoCH M5: ", g_LastSniper.pullback.chochM5 ? "YES" : "NO");
-   Print("   M5 Pattern: ", g_LastSniper.m5Confirm.patternName);
+   // Log
+   Print("======================================================");
+   Print("  SIGNAL SOURCE: ", signalSource);
+   Print("  Direction: ", direction,
+         " | Confidence: ", DoubleToString(confidence, 1), "%");
+   if(signalSource == "LOCAL") {
+      Print("  Local mode: size=", DoubleToString(sizeFactor, 1),
+            "x score>=", scoreThreshold,
+            " local_trades=", g_LocalTradesToday, "/", Local_Max_Daily_Trades);
+   } else {
+      Print("  Timing: ", timingMode,
+            " | Size: ", DoubleToString(sizeFactor, 2), "x",
+            " | TP: ", tpMode);
+   }
+   Print("  Sniper Score: ", g_LastSniper.score);
+   Print("  Sweep: ", g_LastSniper.sweep.detected ? "YES" : "NO",
+         " | BOS: ", g_LastSniper.bos.detected ? g_LastSniper.bos.direction : "NONE",
+         " | PD: ", g_LastSniper.pullback.pdType,
+         " | CHoCH: ", g_LastSniper.pullback.chochM5 ? "YES" : "NO");
+   Print("======================================================");
 
    //================================================================
-   // STEP 7: EXECUTE TRADE
+   // EXECUTE TRADE (override temporaire g_Signal pour les parametres)
    //================================================================
+   double savedSizeFactor  = g_Signal.size_factor;
+   string savedTpMode      = g_Signal.tp_mode;
+   bool   savedWiderStops  = g_Signal.wider_stops;
+
+   g_Signal.size_factor = sizeFactor;
+   g_Signal.tp_mode     = tpMode;
+   g_Signal.wider_stops = widerStops;
+
    ExecuteTrade(direction);
+
+   // Restaurer g_Signal
+   g_Signal.size_factor = savedSizeFactor;
+   g_Signal.tp_mode     = savedTpMode;
+   g_Signal.wider_stops = savedWiderStops;
+
+   // Incrementer compteur local si trade local
+   if(signalSource == "LOCAL") g_LocalTradesToday++;
 }
 
 //+------------------------------------------------------------------+
@@ -1184,12 +1364,19 @@ void UpdateDashboard() {
    string pnlStatus = StringFormat("P&L: %.2f EUR | Trades: %d/%d", 
                                     g_DailyPnL, g_TradesToday, (int)Max_Daily_Trades);
    
+   // Local mode status
+   string localStatus = StringFormat("Local: %d/%d trades | Mode: %s",
+                                      g_LocalTradesToday,
+                                      Local_Max_Daily_Trades,
+                                      Enable_Local_Mode ? "ON" : "OFF");
+
    Comment(line1 + "\n\n" +
            sigStatus + "\n" +
            timingStatus + "\n" +
            posStatus + "\n" +
            sniperStatus + "\n" +
-           pnlStatus);
+           pnlStatus + "\n" +
+           localStatus);
 }
 
 // FIX N3 (2026-04-03): ExtractString() et ExtractDouble() supprimés (dead code, remplacé par CJsonParser)
