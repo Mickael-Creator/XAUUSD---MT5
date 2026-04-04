@@ -133,24 +133,24 @@ public:
    // Initialization
    bool Initialize(bool enableCooldown = true,
                    int cooldownMinutes = 30,
-                   int cooldownAfterLoss = 45,
+                   int cooldownAfterLoss = 30,
                    bool enableRange = true,
                    double minRangeATR = 0.5,
                    int rangeLookback = 12,
                    bool enableConsecutive = true,
-                   int maxConsecutiveLosses = 3,
+                   int maxConsecutiveLosses = 4,
                    int maxConsecutiveWins = 10,  // FIX M3 (2026-04-03): 5->10 ne pas bloquer en tendance forte
-                   int maxSameDirection = 3,
+                   int maxSameDirection = 5,
                    bool enableSameLevel = true,
                    double sameLevelPips = 30,
                    int sameLevelLookback = 5,
                    bool enableDailyLimits = true,
-                   int maxDailyTrades = 5,
+                   int maxDailyTrades = 6,
                    double maxDailyLoss = 400,
                    double maxDailyDD = 300,
                    bool enableSession = true,
-                   string sessionStart = "08:00",
-                   string sessionEnd = "20:00",
+                   string sessionStart = "07:00",
+                   string sessionEnd = "18:00",
                    bool allowAsian = false,
                    bool enableTrendFilter = true);
    
@@ -543,11 +543,10 @@ bool CQualityFilters::CheckSession() {
 //| Check Drawdown                                                    |
 //+------------------------------------------------------------------+
 bool CQualityFilters::CheckDrawdown() {
-   if(!m_enableDailyLimits) return true;
-   
-   UpdateDailyStats();
-   
-   return (m_dailyMaxDD < m_maxDailyDD);
+   // REMOVED: redondant avec FTMO DD check 4.5% dans EA (CheckFTMOLimits)
+   // Le triple check DD (QF 300$ + QF 400$ + EA 4.5%) bloquait trop tot
+   // La protection DD est assuree par CheckFTMOLimits() qui calcule le DD reel
+   return true;
 }
 
 //+------------------------------------------------------------------+

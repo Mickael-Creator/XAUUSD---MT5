@@ -72,8 +72,8 @@ input double Sniper_Min_RR = 2.0;
 input int    Sniper_Min_Score = 55;        // Abaissé après recalibrage scoring
 input double Sniper_Max_Spread = 4.5;      // Ã‰largi pour volatilitÃ© news
 input double Sniper_SL_Buffer_Pips = 3.0;  // M15: Buffer plus large
-input double Sniper_SL_Min_Pips = 20.0;    // M15: SL minimum plus large
-input double Sniper_SL_Max_Pips = 60.0;    // M15: SL max pour news
+input double Sniper_SL_Min_Pips = 25.0;    // M15: SL minimum (evite stop hunts news)
+input double Sniper_SL_Max_Pips = 45.0;    // M15: SL max (partial TP toujours viable)
 input bool   Use_M5_Confirmation = true;   // Confirmation pattern M5
 
 //+------------------------------------------------------------------+
@@ -86,7 +86,7 @@ input bool   Enable_Partial_TP = true;
 input double Partial_Percent = 40.0;
 input double Partial_At_RR = 1.0;
 input bool   Move_To_BE_After_Partial = true;
-input double BE_Buffer_Pips = 2.0;
+input double BE_Buffer_Pips = 3.0;          // 3 pips > spread XAUUSD (2-3 pips)
 input bool   Enable_Trailing = true;
 input double Trail_ATR_Mult = 1.5;
 
@@ -255,9 +255,9 @@ int OnInit() {
    }
    
    if(!g_filters.Initialize(
-         true, 30, 45,          // Cooldown (after loss=45min, after win=0 hardcoded)
+         true, 30, 30,          // Cooldown (after loss=30min, after win=0)
          true, 0.5, 12,        // Range
-         true, 3, 10, 3,       // Consecutive — FIX M3: maxWins 5->10
+         true, 4, 10, 5,       // Consecutive: losses=4, wins=10, sameDir=5
          true, 30.0, 5,        // Same level
          true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0,
          Enable_Session_Filter, Session_Start, Session_End, false)) {
