@@ -543,8 +543,10 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
          // CORRECTION 10: Limiter la recherche correctement
          int maxJ = MathMin(swingBar, m_maxBarsAfterSweep);
          
-         for(int j = 0; j < maxJ; j++) {
-            // CORRECTION 11: VÃ©rifier limites array
+         // FIX ICT-S2 (2026-04-03): Sweep commence a j=1 (bougie fermee uniquement)
+         // Coherence avec DetectBOS() qui commence aussi a j=1
+         // Un sweep sur bougie non fermee (j=0) peut etre invalide a la cloture
+         for(int j = 1; j < maxJ; j++) {
             if(j >= arraySize) break;
 
             if(m_low_M15[j] < level) {
@@ -602,7 +604,10 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
          
          int maxJ = MathMin(swingBar, m_maxBarsAfterSweep);
          
-         for(int j = 0; j < maxJ; j++) {
+         // FIX ICT-S2 (2026-04-03): Sweep commence a j=1 (bougie fermee uniquement)
+         // Coherence avec DetectBOS() qui commence aussi a j=1
+         // Un sweep sur bougie non fermee (j=0) peut etre invalide a la cloture
+         for(int j = 1; j < maxJ; j++) {
             if(j >= arraySize) break;
 
             if(m_high_M15[j] > level) {
@@ -863,6 +868,29 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos
 
    // 3) Timing shift on M5 (CHoCH required)
    ICT_Shift sh = m_ictDetector.DetectShiftM5(direction, m_open_M5, m_close_M5, m_high_M5, m_low_M5, m_time_M5, 60, atr);
+
+   // FIX ICT-C1 (2026-04-03): CHoCH M5 doit etre posterieur au BOS M15
+   // Sequence ICT correcte : BOS M15 -> CHoCH M5 (pas l'inverse)
+   // Un CHoCH M5 anterieur au BOS M15 n'est pas une confirmation valide
+   if(sh.choch && bos.detected && bos.bosTime > 0) {
+      // Convertir bosBar M15 en temps approximatif M5
+      // BOS M15 = bos.bosBar bougies M15 en arriere
+      // 1 bougie M15 = 3 bougies M5
+      int bosBarInM5 = bos.bosBar * 3; // Approximation
+
+      // Verifier que le CHoCH M5 s'est produit APRES le BOS M15
+      // sh.bar = index M5 du CHoCH (0 = plus recent)
+      // CHoCH valide si son index M5 < bosBarInM5 (plus recent que le BOS)
+      if(sh.bar > bosBarInM5) {
+         // CHoCH trop ancien — anterieur au BOS M15
+         sh.choch = false;
+         sh.bos = false;
+         Print("[ICT-C1] CHoCH M5 invalide: anterieur au BOS M15 (choch=",
+               sh.bar, " bars M5, BOS=", bos.bosBar, " bars M15 = ",
+               bosBarInM5, " bars M5)");
+      }
+   }
+
    zone.chochM5 = sh.choch;
    zone.bosM5 = sh.bos;
 
