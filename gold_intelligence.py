@@ -437,19 +437,37 @@ def _fetch_macro() -> dict:
     result["fed_funds_rate"]       = get_fed_funds_rate()
     result["yield_curve_10y2y"]    = get_yield_curve_10y2y()
 
+    # FIX DXY/VIX (2026-04-04): Lire le fichier JSON local de dxy_fetcher
+    # Au lieu de HTTP localhost:5000 (calendar_monitor non disponible)
     try:
-        r = requests.get(f"{CONFIG['local_api_base']}/dxy_data", timeout=3)
-        if r.status_code == 200:
-            result["dxy"] = r.json().get("dxy_index", result.get("dxy"))
+        import json as _json
+        dxy_file = "/root/gold_ml_phase4/dxy_data.json"
+        with open(dxy_file, "r") as f:
+            dxy_data = _json.load(f)
+        
+        # DXY
+        dxy_val = dxy_data.get("dxy", {}).get("value")
+        if dxy_val is not None:
+            result["dxy"] = float(dxy_val)
+            logger.info(f"[DXY] File read: {result['dxy']}")
+        
+        # US10Y (bonus: aussi disponible dans ce fichier)
+        us10y_val = dxy_data.get("us10y", {}).get("value")
+        if us10y_val is not None:
+            result["us10y"] = float(us10y_val)
     except Exception as e:
-        logger.warning(f"DXY fetch failed (using cache): {e}")
+        logger.warning(f"DXY file read failed (using cache): {e}")
 
+    # VIX: yfinance direct fallback (pas dans dxy_data.json)
     try:
-        r = requests.get(f"{CONFIG['local_api_base']}/vix_data", timeout=3)
-        if r.status_code == 200:
-            result["vix"] = r.json().get("vix_level", result.get("vix"))
+        import yfinance as yf
+        vix_ticker = yf.Ticker("^VIX")
+        vix_hist = vix_ticker.history(period="2d")
+        if vix_hist is not None and len(vix_hist) > 0:
+            result["vix"] = float(vix_hist["Close"].iloc[-1])
+            logger.info(f"[VIX] Direct fetch: {result['vix']}")
     except Exception as e:
-        logger.warning(f"VIX fetch failed (using cache): {e}")
+        logger.warning(f"VIX direct fetch failed (using cache): {e}")
 
     return result
 
@@ -597,15 +615,38 @@ def _calculate_signal(macro: dict, cot: dict, news: dict,
             "geopolitical": geo,
         }
 
+        # FIX NEWS-KEYS (2026-04-04): Mapper les cles du fetcher vers celles de l'analyzer
+        # news_fetcher_v2 retourne: next_high_impact (str), time_until_hours, events_with_results
+        # news_trading_signal.py attend: next_event (dict), hours_to_next, recent_results (list)
+        _next_hi = news.get("next_high_impact", "Unknown")
+        _events_wr = news.get("events_with_results", [])
+        
+        # Mapper events_with_results vers le format attendu par l'analyzer
+        # L'analyzer cherche: event.get('impact'), event.get('hours_since'), event.get('event')
+        _recent = []
+        for ev in _events_wr:
+            td = ev.get("time_diff_hours", 0)
+            _recent.append({
+                "event":      ev.get("name", "Unknown"),
+                "impact":     "High",  # events_with_results ne contient que les high impact
+                "actual":     ev.get("actual"),
+                "forecast":   ev.get("forecast"),
+                "previous":   ev.get("previous"),
+                "hours_since": abs(td) if td < 0 else 0,  # Negatif = passe
+            })
+
         news_data = {
-            "next_event":     news.get("next_event", {}),
-            "hours_to_next":  news.get("hours_to_next"),
-            "recent_results": news.get("recent_results", []),
-            # Compatibilité avec les deux formats possible de news_fetcher
-            "next_high_impact":  news.get("next_high_impact"),
-            "time_until_hours":  news.get("time_until_hours"),
-            "in_blackout":       news.get("in_blackout", False),
+            "next_event": {
+                "event": _next_hi if isinstance(_next_hi, str) else str(_next_hi),
+                "impact": "High",
+            },
+            "hours_to_next":  news.get("time_until_hours"),
+            "recent_results": _recent,
+            "in_blackout":    news.get("in_blackout", False),
         }
+        
+        if _recent:
+            logger.info(f"[NEWS] {len(_recent)} resultats recents mappes, prochain: {_next_hi}")
 
         signal = news_analyzer.generate_signal(
             news_data=news_data,
