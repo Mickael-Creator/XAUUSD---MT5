@@ -561,9 +561,89 @@ class NewsTradingAnalyzer:
 
         confidence = min(raw_confidence, max_confidence)
 
+        # ═══════════════════════════════════════════════════════════
+        # BOOST CLEAR (2026-04-04): Session boost + seuil minimum
+        # Augmente la frequence des signaux CLEAR de qualite
+        # ═══════════════════════════════════════════════════════════
+        session_name = "UNKNOWN"
+        session_boost_applied = False
+        confidence_floor_applied = False
+
+        if timing_mode == TimingMode.CLEAR:
+            utc_hour = datetime.now(timezone.utc).hour
+            utc_minute = datetime.now(timezone.utc).minute
+            time_decimal = utc_hour + utc_minute / 60.0
+
+            # Determiner la session active
+            if 12.0 <= time_decimal < 14.0:
+                session_name = "LONDON_NY_OVERLAP"
+                in_active_session = True
+            elif 7.0 <= time_decimal < 9.0:
+                session_name = "LONDON_OPEN"
+                in_active_session = True
+            elif 9.0 <= time_decimal < 12.0:
+                session_name = "LONDON"
+                in_active_session = True
+            elif 14.0 <= time_decimal < 17.0:
+                session_name = "NEW_YORK"
+                in_active_session = True
+            elif 17.0 <= time_decimal < 18.0:
+                session_name = "NY_CLOSE"
+                in_active_session = False
+            else:
+                session_name = "OFF_HOURS"
+                in_active_session = False
+
+            # OPTION B: Session active compte comme indicateur supplementaire
+            # Le cap monte d'un tier (ex: 2 aligned + session = cap 73%)
+            if in_active_session and aligned_count >= 2:
+                session_aligned = aligned_count + 1
+                session_cap = confidence_caps.get(
+                    session_aligned, 98.0 if session_aligned >= 6 else 45.0
+                )
+                if session_cap > max_confidence:
+                    old_conf = confidence
+                    confidence = min(raw_confidence, session_cap)
+                    if confidence > old_conf:
+                        session_boost_applied = True
+                        reasoning.append(
+                            f"SESSION_BOOST: {session_name} ({utc_hour}h UTC), "
+                            f"cap {max_confidence:.0f}% -> {session_cap:.0f}%"
+                        )
+
+            # OPTION D: Seuil minimum garanti en CLEAR
+            # Conditions strictes : 2+ indicateurs alignes + session active
+            # + score dominant >= 40 + marge >= 15
+            dominant_score = max(bias_scores['BULLISH'], bias_scores['BEARISH'])
+            score_margin = abs(bias_scores['BULLISH'] - bias_scores['BEARISH'])
+
+            if (in_active_session and
+                aligned_count >= 2 and
+                dominant_score >= 40 and
+                score_margin >= 15 and
+                confidence < 60):
+
+                old_conf = confidence
+                confidence = 60.0
+                confidence_floor_applied = True
+                reasoning.append(
+                    f"CLEAR_FLOOR: {old_conf:.0f}% -> 60% "
+                    f"(aligned={aligned_count}, score={dominant_score}, "
+                    f"margin={score_margin}, session={session_name})"
+                )
+
+            logger.info(
+                f"[SIGNAL] conf={confidence:.0f}% dir={entry_bias} "
+                f"session={session_name} boost={session_boost_applied} "
+                f"floor={confidence_floor_applied} aligned={aligned_count}"
+            )
+        else:
+            session_name = timing_mode.value  # BLACKOUT, PRE_NEWS, POST_NEWS
+
         reasoning.append(
             f"Scores — BULL:{bias_scores['BULLISH']} BEAR:{bias_scores['BEARISH']} "
-            f"| aligned={aligned_count} | cap={max_confidence:.0f}%"
+            f"| aligned={aligned_count} | cap={max_confidence:.0f}% "
+            f"| session={session_name}"
         )
         
         # ═══════════════════════════════════════════════════════════
