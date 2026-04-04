@@ -198,10 +198,11 @@ private:
    LiquiditySweep DetectLiquiditySweep(string direction);
    // FIX ICT-B3: parametre sweepBar pour garantir BOS apres sweep
    BreakOfStructure DetectBOS(string direction, int sweepBar = -1);
-   PullbackZone AnalyzePullback(string direction, BreakOfStructure &bos);
+   PullbackZone AnalyzePullback(string direction, BreakOfStructure &bos, string timingMode = "CLEAR");
    M5Confirmation CheckM5Confirmation(string direction);
    ENUM_M5_PATTERN DetectM5Pattern(string direction);
    double   CalculateSL(string direction, LiquiditySweep &sweep);
+   bool     CheckH4Structure(string direction);
    int      CalculateScore(SniperResultM15 &result);
    string   GetActiveSession();
    int      GetSessionBoost(string session);
@@ -766,7 +767,7 @@ BreakOfStructure CSniperM15::DetectBOS(string direction, int sweepBar) {
 //+------------------------------------------------------------------+
 //| Analyze Pullback Zone (Institutional ICT Style)                  |
 //+------------------------------------------------------------------+
-PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos) {
+PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos, string timingMode) {
    PullbackZone zone;
    zone.inZone = false;
    zone.mitigated = false;
@@ -894,8 +895,21 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos
    zone.chochM5 = sh.choch;
    zone.bosM5 = sh.bos;
 
-   // Final: mitigation + CHoCH = valid entry zone
-   zone.inZone = (zone.mitigated && zone.chochM5);
+   // Final: mitigation + confirmation = valid entry zone
+   // SETUP-E (2026-04-04): En POST_NEWS, accepter pattern M5 sans CHoCH complet
+   if(timingMode == "POST_NEWS_ENTRY" && zone.mitigated && !zone.chochM5) {
+      // Verifier si un pattern de retournement M5 existe dans la zone
+      M5Confirmation m5Check = CheckM5Confirmation(direction);
+      if(m5Check.hasPattern && m5Check.patternScore >= 75) {
+         zone.inZone = true;
+         Print("[SETUP-E] POST_NEWS: pattern M5 ", m5Check.patternName,
+               " (score=", m5Check.patternScore, ") accepte au lieu de CHoCH");
+      } else {
+         zone.inZone = false;
+      }
+   } else {
+      zone.inZone = (zone.mitigated && zone.chochM5);
+   }
 
    return zone;
 }
@@ -1077,6 +1091,41 @@ double CSniperM15::CalculateSL(string direction, LiquiditySweep &sweep) {
 }
 
 //+------------------------------------------------------------------+
+//| Check H4 Structure (for SETUP-A BOS Direct)                     |
+//+------------------------------------------------------------------+
+bool CSniperM15::CheckH4Structure(string direction) {
+   double h4High[], h4Low[];
+   ArraySetAsSeries(h4High, true);
+   ArraySetAsSeries(h4Low, true);
+
+   if(CopyHigh(m_symbol, PERIOD_H4, 1, 50, h4High) < 50) return false;
+   if(CopyLow(m_symbol,  PERIOD_H4, 1, 50, h4Low)  < 50) return false;
+
+   double swH[3], swL[3];
+   int shC = 0, slC = 0;
+
+   for(int i = 3; i < 47 && (shC < 3 || slC < 3); i++) {
+      if(shC < 3 &&
+         h4High[i] > h4High[i-1] && h4High[i] > h4High[i-2] &&
+         h4High[i] > h4High[i+1] && h4High[i] > h4High[i+2])
+         swH[shC++] = h4High[i];
+      if(slC < 3 &&
+         h4Low[i] < h4Low[i-1] && h4Low[i] < h4Low[i-2] &&
+         h4Low[i] < h4Low[i+1] && h4Low[i] < h4Low[i+2])
+         swL[slC++] = h4Low[i];
+   }
+
+   if(shC < 2 || slC < 2) return false;
+
+   bool h4Bullish = (swH[0] > swH[1] && swL[0] > swL[1]);
+   bool h4Bearish = (swH[0] < swH[1] && swL[0] < swL[1]);
+
+   if(direction == "BUY")  return h4Bullish;
+   if(direction == "SELL") return h4Bearish;
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| Calculate Score                                                  |
 //+------------------------------------------------------------------+
 int CSniperM15::CalculateScore(SniperResultM15 &result) {
@@ -1231,7 +1280,19 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    // Step 2: Detect Liquidity Sweep
    result.sweep = DetectLiquiditySweep(direction);
    
-   if(m_requireSweep && !result.sweep.detected) {
+   // SETUP-A (2026-04-04): BOS Direct si H4 forte + confidence elevee
+   bool allowBOSDirect = false;
+   if(!result.sweep.detected && m_requireSweep) {
+      bool highConfidence = (confidence >= 75.0);
+      bool h4Strong = CheckH4Structure(direction);
+      if(highConfidence && h4Strong) {
+         allowBOSDirect = true;
+         Print("[SETUP-A] BOS Direct active: confidence=", DoubleToString(confidence, 0),
+               "% H4 forte -> sweep non requis");
+      }
+   }
+
+   if(m_requireSweep && !result.sweep.detected && !allowBOSDirect) {
       result.reason = "No liquidity sweep detected";
       m_lastResult = result;
       return result;
@@ -1273,7 +1334,7 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    }
    
    // Step 4: Analyze Pullback
-   result.pullback = AnalyzePullback(direction, result.bos);
+   result.pullback = AnalyzePullback(direction, result.bos, timingMode);
    
    if(!result.pullback.mitigated) {
       result.reason = "No mitigation on M5 PD array";

@@ -163,6 +163,19 @@ struct LocalSignal {
 };
 
 //+------------------------------------------------------------------+
+//| LONDON RANGE SIGNAL (Setup C - London Open Breakout)             |
+//+------------------------------------------------------------------+
+struct LondonRangeSignal {
+   bool     detected;
+   string   direction;
+   double   rangeHigh;
+   double   rangeLow;
+   double   breakLevel;
+   double   confidence;
+};
+
+
+//+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                  |
 //+------------------------------------------------------------------+
 NewsSignal g_Signal;
@@ -598,6 +611,99 @@ bool ParseSignalJSON(string json) {
 }
 
 //+------------------------------------------------------------------+
+//| SETUP-C: Detect London Open Range Breakout                        |
+//| Range 07:00-09:00 GMT, cassure apres 09:00 avec volume           |
+//+------------------------------------------------------------------+
+LondonRangeSignal DetectLondonRangeSetup() {
+   LondonRangeSignal setup;
+   setup.detected = false;
+   setup.direction = "NONE";
+   setup.confidence = 0;
+   setup.rangeHigh = 0;
+   setup.rangeLow = 0;
+   setup.breakLevel = 0;
+
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   int hour = dt.hour;
+
+   // Fenetre d'entree : 09:00-11:00 GMT seulement
+   if(hour < 9 || hour >= 11) return setup;
+
+   double high[], low[], close[];
+   datetime times[];
+   ArraySetAsSeries(high,  true);
+   ArraySetAsSeries(low,   true);
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(times, true);
+
+   int bars = 20;
+   if(CopyHigh(_Symbol,  PERIOD_M15, 0, bars, high)  < bars) return setup;
+   if(CopyLow(_Symbol,   PERIOD_M15, 0, bars, low)   < bars) return setup;
+   if(CopyClose(_Symbol, PERIOD_M15, 0, bars, close) < bars) return setup;
+   if(CopyTime(_Symbol,  PERIOD_M15, 0, bars, times) < bars) return setup;
+
+   double rangeHigh = 0, rangeLow = 999999;
+   int rangeCount = 0;
+
+   for(int i = 1; i < bars; i++) {
+      MqlDateTime bdt;
+      TimeToStruct(times[i], bdt);
+      if(bdt.hour >= 7 && bdt.hour < 9) {
+         if(high[i] > rangeHigh) rangeHigh = high[i];
+         if(low[i]  < rangeLow)  rangeLow  = low[i];
+         rangeCount++;
+      }
+   }
+
+   if(rangeCount < 4 || rangeHigh <= rangeLow) return setup;
+
+   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(pt <= 0) pt = 0.01;
+   double rangeSize = (rangeHigh - rangeLow) / (pt * 10);
+
+   // Range valide : entre 15 et 60 pips
+   if(rangeSize < 15 || rangeSize > 60) return setup;
+
+   // Cassure haussiere : close[1] > rangeHigh (bougie fermee)
+   if(close[1] > rangeHigh && close[2] <= rangeHigh) {
+      setup.detected   = true;
+      setup.direction  = "BUY";
+      setup.rangeHigh  = rangeHigh;
+      setup.rangeLow   = rangeLow;
+      setup.breakLevel = rangeHigh;
+
+      double volRatio = (double)iVolume(_Symbol, PERIOD_M15, 1) /
+                        MathMax(1.0, (double)iVolume(_Symbol, PERIOD_M15, 5));
+      setup.confidence = MathMin(100.0, 50 + (volRatio * 25) +
+                         (rangeSize > 25 ? 10 : 0) + (rangeSize > 40 ? 15 : 0));
+   }
+   // Cassure baissiere : close[1] < rangeLow
+   else if(close[1] < rangeLow && close[2] >= rangeLow) {
+      setup.detected   = true;
+      setup.direction  = "SELL";
+      setup.rangeHigh  = rangeHigh;
+      setup.rangeLow   = rangeLow;
+      setup.breakLevel = rangeLow;
+
+      double volRatio = (double)iVolume(_Symbol, PERIOD_M15, 1) /
+                        MathMax(1.0, (double)iVolume(_Symbol, PERIOD_M15, 5));
+      setup.confidence = MathMin(100.0, 50 + (volRatio * 25) +
+                         (rangeSize > 25 ? 10 : 0) + (rangeSize > 40 ? 15 : 0));
+   }
+
+   if(setup.detected) {
+      Print("[SETUP-C] London Range: ",
+            DoubleToString(rangeLow, 2), "-", DoubleToString(rangeHigh, 2),
+            " (", DoubleToString(rangeSize, 0), " pips)",
+            " Break: ", setup.direction,
+            " Conf: ", DoubleToString(setup.confidence, 0), "%");
+   }
+
+   return setup;
+}
+
+//+------------------------------------------------------------------+
 //| GET LOCAL SIGNAL (H4 Structure + EMA M15 + Session + ATR)         |
 //| Calcule direction et confidence localement quand API silencieuse  |
 //+------------------------------------------------------------------+
@@ -762,17 +868,29 @@ void CheckEntry() {
       // Limiter les trades locaux journaliers
       if(g_LocalTradesToday >= Local_Max_Daily_Trades) return;
 
-      LocalSignal local = GetLocalSignal();
+      // SETUP-C: London Range Breakout (priorite sur signal local classique)
+      LondonRangeSignal londonRange = DetectLondonRangeSetup();
+      if(londonRange.detected && londonRange.confidence >= 60) {
+         direction    = londonRange.direction;
+         confidence   = londonRange.confidence;
+         signalSource = "LONDON_RANGE";
+         timingMode   = "CLEAR";
+         sizeFactor   = Local_Size_Factor;
+         tpMode       = "NORMAL";
+         widerStops   = false;
+      } else {
+         // Signal local classique (H4 + EMA)
+         LocalSignal local = GetLocalSignal();
+         if(local.direction == "NONE" || local.confidence < Local_Min_Confidence) return;
 
-      if(local.direction == "NONE" || local.confidence < Local_Min_Confidence) return;
-
-      direction    = local.direction;
-      confidence   = local.confidence;
-      signalSource = "LOCAL";
-      timingMode   = "CLEAR";
-      sizeFactor   = Local_Size_Factor;
-      tpMode       = "NORMAL";
-      widerStops   = false;
+         direction    = local.direction;
+         confidence   = local.confidence;
+         signalSource = "LOCAL";
+         timingMode   = "CLEAR";
+         sizeFactor   = Local_Size_Factor;
+         tpMode       = "NORMAL";
+         widerStops   = false;
+      }
    }
    else {
       return;
@@ -826,7 +944,10 @@ void CheckEntry() {
    g_LastSniper = g_sniper.AnalyzeEntry(direction, confidence, timingMode);
 
    if(g_LastSniper.score < scoreThreshold) return;
-   if(!g_LastSniper.sweep.detected || !g_LastSniper.bos.detected || !g_LastSniper.pullback.inZone) return;
+   // SETUP-A/C: sweep non requis pour BOS Direct et London Range
+   bool sweepRequired = (signalSource != "LONDON_RANGE");
+   if(sweepRequired && !g_LastSniper.sweep.detected) return;
+   if(!g_LastSniper.bos.detected || !g_LastSniper.pullback.inZone) return;
 
    // Log
    Print("======================================================");
@@ -868,7 +989,7 @@ void CheckEntry() {
    g_Signal.wider_stops = savedWiderStops;
 
    // Incrementer compteur local si trade local
-   if(signalSource == "LOCAL") g_LocalTradesToday++;
+   if(signalSource == "LOCAL" || signalSource == "LONDON_RANGE") g_LocalTradesToday++;
 }
 
 //+------------------------------------------------------------------+
