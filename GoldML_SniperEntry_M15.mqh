@@ -1208,8 +1208,10 @@ int CSniperM15::CalculateScore(SniperResultM15 &result) {
 //| Get Active Session                                               |
 //+------------------------------------------------------------------+
 string CSniperM15::GetActiveSession() {
+   // FIX TIMEZONE (2026-04-05): TimeGMT() pour coherence avec VPS UTC
+   // TimeCurrent() retourne heure serveur (UTC+2/+3), pas GMT
    MqlDateTime dt;
-   TimeCurrent(dt);
+   TimeGMT(dt);
    int hour = dt.hour;
    
    if(hour >= 7 && hour < 9) return "LONDON_OPEN";

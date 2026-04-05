@@ -497,21 +497,24 @@ bool CPositionManagerV2::IsBOSAgainstPosition() {
    double close[];
    ArraySetAsSeries(close, true);
    if(CopyClose(m_symbol, PERIOD_M5, 0, 10, close) < 10) return false;
-   
+
+   // FIX B1 (2026-04-05): Utiliser bougie fermee (close[1]) au lieu de close[0]
+   // close[0] = bougie courante non fermee -> faux BOS sur spike intra-bougie
+   // close[1] = derniere bougie fermee -> signal fiable et coherent avec le reste du systeme
    if(m_position.isBuy) {
       // For BUY: BOS is when price closes below a recent swing low
       double swingLow = GetCurrentSwingLow();
-      if(swingLow > 0 && close[0] < swingLow) {
+      if(swingLow > 0 && close[1] < swingLow) {
          return true;
       }
    } else {
       // For SELL: BOS is when price closes above a recent swing high
       double swingHigh = GetCurrentSwingHigh();
-      if(swingHigh > 0 && close[0] > swingHigh) {
+      if(swingHigh > 0 && close[1] > swingHigh) {
          return true;
       }
    }
-   
+
    return false;
 }
 

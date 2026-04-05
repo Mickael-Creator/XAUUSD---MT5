@@ -199,6 +199,9 @@ int g_hLocalEMA50 = INVALID_HANDLE;
 int g_hLocalATR   = INVALID_HANDLE;
 double g_DailyPnL = 0;
 
+// FIX C3 (2026-04-05): Derniere confidence API valide pour proteger ManagePosition si VPS down
+double g_LastValidConfidence = 60.0;
+
 // Sniper result cache
 SniperResultM15 g_LastSniper;
 
@@ -627,6 +630,11 @@ bool ParseSignalJSON(string json) {
    g_Signal.is_valid    = true;
    g_Signal.last_update = TimeCurrent();
 
+   // FIX C3 (2026-04-05): Sauvegarder derniere confidence valide pour ManagePosition
+   // Si le VPS tombe, ManagePosition utilisera cette valeur au lieu de 0
+   if(g_Signal.confidence >= 60.0)
+      g_LastValidConfidence = g_Signal.confidence;
+
    return true;
 }
 
@@ -801,8 +809,11 @@ LocalSignal GetLocalSignal() {
    }
 
    // === 3. SESSION (15 pts max) ===
+   // FIX TIMEZONE (2026-04-05): TimeGMT() au lieu de TimeCurrent()
+   // TimeCurrent() = heure serveur MT5 (UTC+2 ou UTC+3 chez FTMO)
+   // TimeGMT() = heure GMT reelle, coherente avec le VPS (UTC)
    MqlDateTime dt;
-   TimeCurrent(dt);
+   TimeGMT(dt);
    int hour = dt.hour;
 
    double sessionScore = 0;
@@ -1298,7 +1309,13 @@ void ManagePosition() {
    // FIX N1 (2026-04-03): Distinguer partial TP d'une fermeture totale
    // EXIT_TP_PARTIAL = action intermédiaire, 50% de la position reste ouverte
    // Les autres codes = fermeture totale réelle
-   ENUM_EXIT_REASON exitCode = g_posMgr.ManagePosition(g_Signal.confidence / 10.0,
+   // FIX C3 (2026-04-05): Utiliser derniere confidence valide si VPS down
+   // Evite fermeture prematuree d'un trade gagnant quand VPS devient indisponible
+   double conviction = g_Signal.is_valid ?
+                       g_Signal.confidence / 10.0 :
+                       g_LastValidConfidence / 10.0;
+   ENUM_EXIT_REASON exitCode = g_posMgr.ManagePosition(conviction,
+                                                        g_Signal.is_valid &&
                                                         g_Signal.timing_mode == "BLACKOUT");
 
    if(exitCode == EXIT_TP_PARTIAL) {
