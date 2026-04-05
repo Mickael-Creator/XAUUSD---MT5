@@ -353,7 +353,11 @@ bool CQualityFilters::IsSameLevel(double price) {
 //+------------------------------------------------------------------+
 bool CQualityFilters::InTradingSession() {
    MqlDateTime t;
-   TimeToStruct(TimeCurrent(), t);
+   // FIX TIMEZONE FINAL (2026-04-05): TimeGMT() au lieu de TimeCurrent()
+   // Session_Start='07:00' et Session_End='18:00' sont documentes en GMT
+   // TimeCurrent() = heure serveur MT5 (UTC+2/+3 chez FTMO) -> decalage 2-3h
+   // TimeGMT() = heure GMT reelle -> coherent avec Sniper, LocalSignal et VPS
+   TimeToStruct(TimeGMT(), t);
    int now = t.hour * 60 + t.min;
    
    string p1[], p2[];
