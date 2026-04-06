@@ -28,7 +28,8 @@ from flask import Flask, jsonify, request, send_file
 from threading import Lock, Event
 from news_fetcher_v2 import fetch_forex_factory_news as fetch_news_v2
 from news_trading_signal import NewsTradingAnalyzer, create_news_trading_endpoint
-from claude_decision_engine import claude_engine
+# FIX COST (2026-04-06): Claude Decision Engine désactivé — redondant avec Option D
+# from claude_decision_engine import claude_engine
 # from python_sniper import python_sniper  # DISABLED: ICT moved to EA local (CSniperM15)
 from fred_service import fred_manager, get_tips_yield, get_breakeven_inflation, get_fed_funds_rate, get_yield_curve_10y2y
 
@@ -759,16 +760,23 @@ def _background_refresh_loop():
                 df_m15 = cache.get_best("market_data_m15") if cache.age_seconds("market_data_m15") < 1800 else None
                 df_m5 = cache.get_best("market_data_m5") if cache.age_seconds("market_data_m5") < 1800 else None
 
-                # === CLAUDE AI ENRICHMENT (+ ICT analysis) ===
-                if claude_engine.is_enabled:
-                    signal = claude_engine.enrich_signal(signal, context={
-                        "macro": cache.get_best("macro"),
-                        "cot": cache.get_best("cot"),
-                        "sentiment": cache.get_best("sentiment"),
-                        "geopolitics": cache.get_best("geopolitics"),
-                        "candles_m15": df_m15,
-                        "candles_m5": df_m5,
-                    })
+                # === CLAUDE AI ENRICHMENT — DISABLED (2026-04-06) ===
+                # Redondant avec Option D (confidence floor 60%) — coût inutile
+                # 100% des appels partaient de 60.0 (Option D floor) avec 0 ajustement négatif
+                # if claude_engine.is_enabled:
+                #     signal = claude_engine.enrich_signal(signal, context={
+                #         "macro": cache.get_best("macro"),
+                #         "cot": cache.get_best("cot"),
+                #         "sentiment": cache.get_best("sentiment"),
+                #         "geopolitics": cache.get_best("geopolitics"),
+                #         "candles_m15": df_m15,
+                #         "candles_m5": df_m5,
+                #     })
+                signal['claude_enriched'] = False
+                signal['claude_confidence_adj'] = 0
+                signal['claude_signal_quality'] = 'N/A'
+                signal['claude_risk_flags'] = []
+                signal['claude_commentary'] = 'Claude engine disabled - redundant with Option D'
 
                 # === PYTHON SNIPER ICT ANALYSIS — DISABLED: ICT moved to EA local (CSniperM15) ===
                 # df_h4 = cache.get_best("market_data_h4") if cache.age_seconds("market_data_h4") < 1800 else None
