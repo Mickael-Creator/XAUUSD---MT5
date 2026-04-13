@@ -97,6 +97,7 @@ private:
    // Option E D.E.A.L. - H4 scoring
    bool     m_enableDEAL;      // Option E activée
    int      m_lastH4Score;     // Dernier score H4 calculé
+   double   m_h4SizeFactor;    // DEAL v2: size factor H4 (0.0=blocked, 0.35-1.0)
 
    // Indicator handles
    int      m_hATR;
@@ -191,6 +192,7 @@ public:
    // Option E D.E.A.L. getters
    int GetLastH4Score() { return m_lastH4Score; }
    bool IsEnableDEAL()  { return m_enableDEAL; }
+   double GetH4SizeFactor() { return m_h4SizeFactor; }
 
    // Manual overrides
    void ResetConsecutive();
@@ -226,6 +228,7 @@ CQualityFilters::CQualityFilters(string symbol, int magic) {
    m_maxTradeHistory = 20;
    m_enableDEAL = true;   // Option E activé directement
    m_lastH4Score = 0;
+   m_h4SizeFactor = 1.0;  // DEAL v2: défaut taille normale
 
    ArrayResize(m_recentTrades, 0);
 }
@@ -575,8 +578,8 @@ int CQualityFilters::GetH4ScoreContribution(string direction, double apiConfiden
    ArraySetAsSeries(h4High, true);
    ArraySetAsSeries(h4Low, true);
 
-   if(CopyHigh(m_symbol, PERIOD_H4, 1, 50, h4High) < 10) return 0;
-   if(CopyLow(m_symbol,  PERIOD_H4, 1, 50, h4Low)  < 10) return 0;
+   if(CopyHigh(m_symbol, PERIOD_H4, 1, 50, h4High) < 10) { m_h4SizeFactor = 1.0; return 0; }
+   if(CopyLow(m_symbol,  PERIOD_H4, 1, 50, h4Low)  < 10) { m_h4SizeFactor = 1.0; return 0; }
 
    double swH[3], swL[3];
    int shC = 0, slC = 0;
@@ -592,42 +595,63 @@ int CQualityFilters::GetH4ScoreContribution(string direction, double apiConfiden
          swL[slC++] = h4Low[i];
    }
 
-   if(shC < 2 || slC < 2) return 0;
+   if(shC < 2 || slC < 2) { m_h4SizeFactor = 1.0; return 0; }
 
-   bool h4Bullish = (swH[0] > swH[1] && swL[0] > swL[1]);
-   bool h4Bearish = (swH[0] < swH[1] && swL[0] < swL[1]);
+   // DEAL v2: 4 etats H4 — aligne / ranging / contre leger / contre fort
+   bool hhDetected = (swH[0] > swH[1]);  // Higher High
+   bool hlDetected = (swL[0] > swL[1]);  // Higher Low
+   bool lhDetected = (swH[0] < swH[1]);  // Lower High
+   bool llDetected = (swL[0] < swL[1]);  // Lower Low
+
+   bool h4Bullish     = (hhDetected && hlDetected);  // HH+HL = tendance haussiere
+   bool h4Bearish     = (lhDetected && llDetected);  // LH+LL = tendance baissiere
+   bool h4ContraLight = (lhDetected != llDetected);  // 1 seul critere casse
 
    int score = 0;
 
    if(direction == "BUY") {
       if(h4Bullish) {
-         score = 25;
-         Print("[DEAL] H4 BULLISH -> +25 pts");
+         score = 25; m_h4SizeFactor = 1.0;
+         Print("[DEAL-v2] H4 BULLISH (HH+HL) -> +25 pts | size 100%");
       }
-      else if(!h4Bullish && !h4Bearish) {
-         // RANGING
-         if(apiConfidence >= 75.0)      { score = 10;  Print("[DEAL] H4 RANGING + API>=75% -> +10 pts"); }
-         else if(apiConfidence >= 65.0) { score =  0;  Print("[DEAL] H4 RANGING + API 65-75% -> 0 pts"); }
-         else                           { score = -15; Print("[DEAL] H4 RANGING + API<65% -> -15 pts"); }
+      else if(!h4Bearish && !h4ContraLight) {
+         // RANGING (HH+LL ou LH+HL = ni trend ni contre clair)
+         if(apiConfidence >= 70.0)      { score = 10;  m_h4SizeFactor = 0.85; Print("[DEAL-v2] H4 RANGING + API>=70% -> +10 | size 85%"); }
+         else if(apiConfidence >= 60.0) { score =  0;  m_h4SizeFactor = 0.70; Print("[DEAL-v2] H4 RANGING + API 60-70% -> 0 | size 70%"); }
+         else                           { score = -10; m_h4SizeFactor = 0.50; Print("[DEAL-v2] H4 RANGING + API<60% -> -10 | size 50%"); }
+      }
+      else if(h4ContraLight) {
+         // CONTRE LEGER: LH seul OU LL seul (pas les deux)
+         if(apiConfidence >= 70.0)      { score = -5;  m_h4SizeFactor = 0.65; Print("[DEAL-v2] H4 CONTRA-LIGHT + API>=70% -> -5 | size 65%"); }
+         else if(apiConfidence >= 60.0) { score = -15; m_h4SizeFactor = 0.50; Print("[DEAL-v2] H4 CONTRA-LIGHT + API 60-70% -> -15 | size 50%"); }
+         else                           { score = -25; m_h4SizeFactor = 0.0;  Print("[DEAL-v2] H4 CONTRA-LIGHT + API<60% -> -25 | BLOCKED"); }
       }
       else if(h4Bearish) {
-         if(apiConfidence >= 80.0)      { score = -5;  Print("[DEAL] H4 BEARISH + API>=80% -> -5 pts"); }
-         else                           { score = -25; Print("[DEAL] H4 BEARISH + API<80% -> -25 pts"); }
+         // CONTRE FORT: LH+LL confirmes
+         if(apiConfidence >= 70.0)      { score = -10; m_h4SizeFactor = 0.50; Print("[DEAL-v2] H4 BEARISH (LH+LL) + API>=70% -> -10 | size 50%"); }
+         else if(apiConfidence >= 60.0) { score = -20; m_h4SizeFactor = 0.35; Print("[DEAL-v2] H4 BEARISH (LH+LL) + API 60-70% -> -20 | size 35%"); }
+         else                           { score = -25; m_h4SizeFactor = 0.0;  Print("[DEAL-v2] H4 BEARISH (LH+LL) + API<60% -> -25 | BLOCKED"); }
       }
    }
    else if(direction == "SELL") {
       if(h4Bearish) {
-         score = 25;
-         Print("[DEAL] H4 BEARISH -> +25 pts");
+         score = 25; m_h4SizeFactor = 1.0;
+         Print("[DEAL-v2] H4 BEARISH (LH+LL) -> +25 pts | size 100%");
       }
-      else if(!h4Bullish && !h4Bearish) {
-         if(apiConfidence >= 75.0)      { score = 10;  Print("[DEAL] H4 RANGING + API>=75% -> +10 pts"); }
-         else if(apiConfidence >= 65.0) { score =  0;  Print("[DEAL] H4 RANGING + API 65-75% -> 0 pts"); }
-         else                           { score = -15; Print("[DEAL] H4 RANGING + API<65% -> -15 pts"); }
+      else if(!h4Bullish && !h4ContraLight) {
+         if(apiConfidence >= 70.0)      { score = 10;  m_h4SizeFactor = 0.85; Print("[DEAL-v2] H4 RANGING + API>=70% -> +10 | size 85%"); }
+         else if(apiConfidence >= 60.0) { score =  0;  m_h4SizeFactor = 0.70; Print("[DEAL-v2] H4 RANGING + API 60-70% -> 0 | size 70%"); }
+         else                           { score = -10; m_h4SizeFactor = 0.50; Print("[DEAL-v2] H4 RANGING + API<60% -> -10 | size 50%"); }
+      }
+      else if(h4ContraLight) {
+         if(apiConfidence >= 70.0)      { score = -5;  m_h4SizeFactor = 0.65; Print("[DEAL-v2] H4 CONTRA-LIGHT + API>=70% -> -5 | size 65%"); }
+         else if(apiConfidence >= 60.0) { score = -15; m_h4SizeFactor = 0.50; Print("[DEAL-v2] H4 CONTRA-LIGHT + API 60-70% -> -15 | size 50%"); }
+         else                           { score = -25; m_h4SizeFactor = 0.0;  Print("[DEAL-v2] H4 CONTRA-LIGHT + API<60% -> -25 | BLOCKED"); }
       }
       else if(h4Bullish) {
-         if(apiConfidence >= 80.0)      { score = -5;  Print("[DEAL] H4 BULLISH + API>=80% -> -5 pts"); }
-         else                           { score = -25; Print("[DEAL] H4 BULLISH + API<80% -> -25 pts"); }
+         if(apiConfidence >= 70.0)      { score = -10; m_h4SizeFactor = 0.50; Print("[DEAL-v2] H4 BULLISH (HH+HL) + API>=70% -> -10 | size 50%"); }
+         else if(apiConfidence >= 60.0) { score = -20; m_h4SizeFactor = 0.35; Print("[DEAL-v2] H4 BULLISH (HH+HL) + API 60-70% -> -20 | size 35%"); }
+         else                           { score = -25; m_h4SizeFactor = 0.0;  Print("[DEAL-v2] H4 BULLISH (HH+HL) + API<60% -> -25 | BLOCKED"); }
       }
    }
 
@@ -684,13 +708,13 @@ bool CQualityFilters::CheckTrendH4(string direction, double apiConfidence) {
    // Option E activée : calculer le score, jamais bloquer sauf cas extrême
    int h4Score = GetH4ScoreContribution(direction, apiConfidence);
 
-   // Seul cas de blocage : H4 fortement contre + API faible
+   // Seul cas de blocage : score -25 = H4 contre + API < 60%
    if(h4Score <= -25) {
-      Print("[DEAL] H4 score -25 -> blocage maintenu (H4 contre-tendance + API<80%)");
+      Print("[DEAL-v2] H4 score -25 -> blocage (H4 contre-tendance + API<60%)");
       return false;
    }
 
-   Print("[DEAL] H4 score=", h4Score, " -> passage autorise");
+   Print("[DEAL-v2] H4 score=", h4Score, " | sizeFactor=", DoubleToString(m_h4SizeFactor, 2), " -> passage autorise");
    return true;
 }
 

@@ -1008,6 +1008,21 @@ void CheckEntry() {
    Print("======================================================");
 
    //================================================================
+   // DEAL v2: Multiplier sizeFactor par le H4 size factor
+   //================================================================
+   if(g_filters != NULL && g_filters.IsEnableDEAL()) {
+      double dealSizeFactor = g_filters.GetH4SizeFactor();
+      if(dealSizeFactor <= 0.0) {
+         Print("[DEAL-v2] sizeFactor=0 -> trade bloque par DEAL");
+         return;
+      }
+      Print("[DEAL-v2] Size: ", DoubleToString(sizeFactor, 2), "x * DEAL ",
+            DoubleToString(dealSizeFactor, 2), "x = ",
+            DoubleToString(sizeFactor * dealSizeFactor, 2), "x");
+      sizeFactor *= dealSizeFactor;
+   }
+
+   //================================================================
    // EXECUTE TRADE (override temporaire g_Signal pour les parametres)
    //================================================================
    double savedSizeFactor  = g_Signal.size_factor;
@@ -1108,8 +1123,12 @@ void ExecuteTrade(string direction) {
    if(lots < minLot) lots = minLot;
    if(lots > maxLot) lots = maxLot;
 
+   // DEAL v2: Log du lot calcule avant override test
+   Print("[DEAL-v2] Pre-test lots=", DoubleToString(lots, 4),
+         " (sizeFactor=", DoubleToString(g_Signal.size_factor, 2), "x)");
+
    // PHASE TEST (2026-04-13): Force 0.01 lot pendant phase de test
-   // A supprimer quand valide
+   // A supprimer quand phase test terminee et DEAL v2 valide
    lots = 0.01;
    Print("[TEST-MODE] Lot force a 0.01 — phase de test active");
 
