@@ -1200,7 +1200,12 @@ int CSniperM15::CalculateScore(SniperResultM15 &result) {
    
    // Session boost
    score += result.sessionBoost;
-   
+
+   // DEAL: Log du score avant/apres H4 pour traçabilite
+   Print("[DEAL-SCORE] Score avant H4: ", score);
+   // Le score H4 est integre via CheckTrendH4 qui autorise/bloque
+   // L ajustement fin se fait via le scoreThreshold
+
    return MathMin(100, MathMax(0, score));
 }
 

@@ -954,7 +954,7 @@ void CheckEntry() {
                      ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                      : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-      FilterResult fr = g_filters.CheckAllFilters(direction, price, timingMode);
+      FilterResult fr = g_filters.CheckAllFilters(direction, price, timingMode, g_Signal.confidence);
       if(!fr.passed) {
          static string lastReason = "";
          if(fr.blockReason != lastReason) {
@@ -1107,6 +1107,11 @@ void ExecuteTrade(string direction) {
    lots = MathFloor(lots / lotStep) * lotStep;
    if(lots < minLot) lots = minLot;
    if(lots > maxLot) lots = maxLot;
+
+   // PHASE TEST (2026-04-13): Force 0.01 lot pendant phase de test
+   // A supprimer quand valide
+   lots = 0.01;
+   Print("[TEST-MODE] Lot force a 0.01 — phase de test active");
 
    Print("[AUDIT-C4] Final lots: ", DoubleToString(lots, 2));
 

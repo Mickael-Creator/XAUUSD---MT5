@@ -94,6 +94,10 @@ private:
    // Settings - Trend (H4 structure)
    bool     m_enableTrendFilter;
 
+   // Option E D.E.A.L. - H4 scoring
+   bool     m_enableDEAL;      // Option E activée
+   int      m_lastH4Score;     // Dernier score H4 calculé
+
    // Indicator handles
    int      m_hATR;
    
@@ -124,8 +128,10 @@ private:
    bool     InTradingSession();
    int      GetMinutesSinceLastTrade();
    // IMPROVE 3 (2026-04-03): Structure H4 au lieu de EMA retail
-   bool     CheckTrendH4(string direction);
-   
+   // Option E DEAL: scoring -25/+25 remplace blocage binaire
+   int      GetH4ScoreContribution(string direction, double apiConfidence);
+   bool     CheckTrendH4(string direction, double apiConfidence = 60.0);
+
 public:
    CQualityFilters(string symbol, int magic);
    ~CQualityFilters();
@@ -156,7 +162,8 @@ public:
    
    // Main filter check
    // FIX C-6.1 (2026-04-03): timingMode ajouté pour désactiver EMA en POST_NEWS
-   FilterResult CheckAllFilters(string direction, double entryPrice, string timingMode = "CLEAR");
+   // Option E DEAL: apiConfidence ajouté pour scoring H4
+   FilterResult CheckAllFilters(string direction, double entryPrice, string timingMode = "CLEAR", double apiConfidence = 60.0);
    
    // Individual filters
    bool CheckCooldown();
@@ -181,6 +188,10 @@ public:
    int GetSameDirectionCount() { return m_sameDirCount; }
    datetime GetLastTradeTime() { return m_lastTradeTime; }
    
+   // Option E D.E.A.L. getters
+   int GetLastH4Score() { return m_lastH4Score; }
+   bool IsEnableDEAL()  { return m_enableDEAL; }
+
    // Manual overrides
    void ResetConsecutive();
    void ResetDaily();
@@ -213,7 +224,9 @@ CQualityFilters::CQualityFilters(string symbol, int magic) {
    m_dailyMaxDD = 0;
    m_dayStart = 0;
    m_maxTradeHistory = 20;
-   
+   m_enableDEAL = true;   // Option E activé directement
+   m_lastH4Score = 0;
+
    ArrayResize(m_recentTrades, 0);
 }
 
@@ -554,67 +567,137 @@ bool CQualityFilters::CheckDrawdown() {
 }
 
 //+------------------------------------------------------------------+
-//| IMPROVE 3 (2026-04-03): Structure HTF H4 au lieu de EMA retail  |
-//| Les institutionnels regardent la structure de marche, pas les MA |
+//| Option E D.E.A.L. — Scoring H4 (-25/+25 pts)                   |
+//| Remplace le blocage binaire par un scoring integre au Sniper    |
 //+------------------------------------------------------------------+
-bool CQualityFilters::CheckTrendH4(string direction) {
-   if(!m_enableTrendFilter) return true;
+int CQualityFilters::GetH4ScoreContribution(string direction, double apiConfidence) {
+   double h4High[], h4Low[];
+   ArraySetAsSeries(h4High, true);
+   ArraySetAsSeries(h4Low, true);
 
-   double high[], low[];
-   ArraySetAsSeries(high, true);
-   ArraySetAsSeries(low, true);
+   if(CopyHigh(m_symbol, PERIOD_H4, 1, 50, h4High) < 10) return 0;
+   if(CopyLow(m_symbol,  PERIOD_H4, 1, 50, h4Low)  < 10) return 0;
 
-   // Copier 50 bougies H4 fermees (a partir de la bougie 1)
-   if(CopyHigh(m_symbol, PERIOD_H4, 1, 50, high) < 50) return true; // Defaut permissif
-   if(CopyLow(m_symbol, PERIOD_H4, 1, 50, low) < 50) return true;
+   double swH[3], swL[3];
+   int shC = 0, slC = 0;
 
-   // Identifier les 3 derniers swing highs et swing lows H4
-   // Swing = bougie dont le high/low est le plus haut/bas parmi les 3 voisins
-   double swingHighs[3], swingLows[3];
-   int shCount = 0, slCount = 0;
+   for(int i = 3; i < 47 && (shC < 3 || slC < 3); i++) {
+      if(shC < 3 &&
+         h4High[i] > h4High[i-1] && h4High[i] > h4High[i-2] &&
+         h4High[i] > h4High[i+1] && h4High[i] > h4High[i+2])
+         swH[shC++] = h4High[i];
+      if(slC < 3 &&
+         h4Low[i] < h4Low[i-1]  && h4Low[i] < h4Low[i-2] &&
+         h4Low[i] < h4Low[i+1]  && h4Low[i] < h4Low[i+2])
+         swL[slC++] = h4Low[i];
+   }
 
-   for(int i = 3; i < 47 && (shCount < 3 || slCount < 3); i++) {
-      // Swing High H4
-      if(shCount < 3 &&
-         high[i] > high[i-1] && high[i] > high[i-2] && high[i] > high[i+1] && high[i] > high[i+2]) {
-         swingHighs[shCount++] = high[i];
+   if(shC < 2 || slC < 2) return 0;
+
+   bool h4Bullish = (swH[0] > swH[1] && swL[0] > swL[1]);
+   bool h4Bearish = (swH[0] < swH[1] && swL[0] < swL[1]);
+
+   int score = 0;
+
+   if(direction == "BUY") {
+      if(h4Bullish) {
+         score = 25;
+         Print("[DEAL] H4 BULLISH -> +25 pts");
       }
-      // Swing Low H4
-      if(slCount < 3 &&
-         low[i] < low[i-1] && low[i] < low[i-2] && low[i] < low[i+1] && low[i] < low[i+2]) {
-         swingLows[slCount++] = low[i];
+      else if(!h4Bullish && !h4Bearish) {
+         // RANGING
+         if(apiConfidence >= 75.0)      { score = 10;  Print("[DEAL] H4 RANGING + API>=75% -> +10 pts"); }
+         else if(apiConfidence >= 65.0) { score =  0;  Print("[DEAL] H4 RANGING + API 65-75% -> 0 pts"); }
+         else                           { score = -15; Print("[DEAL] H4 RANGING + API<65% -> -15 pts"); }
+      }
+      else if(h4Bearish) {
+         if(apiConfidence >= 80.0)      { score = -5;  Print("[DEAL] H4 BEARISH + API>=80% -> -5 pts"); }
+         else                           { score = -25; Print("[DEAL] H4 BEARISH + API<80% -> -25 pts"); }
+      }
+   }
+   else if(direction == "SELL") {
+      if(h4Bearish) {
+         score = 25;
+         Print("[DEAL] H4 BEARISH -> +25 pts");
+      }
+      else if(!h4Bullish && !h4Bearish) {
+         if(apiConfidence >= 75.0)      { score = 10;  Print("[DEAL] H4 RANGING + API>=75% -> +10 pts"); }
+         else if(apiConfidence >= 65.0) { score =  0;  Print("[DEAL] H4 RANGING + API 65-75% -> 0 pts"); }
+         else                           { score = -15; Print("[DEAL] H4 RANGING + API<65% -> -15 pts"); }
+      }
+      else if(h4Bullish) {
+         if(apiConfidence >= 80.0)      { score = -5;  Print("[DEAL] H4 BULLISH + API>=80% -> -5 pts"); }
+         else                           { score = -25; Print("[DEAL] H4 BULLISH + API<80% -> -25 pts"); }
       }
    }
 
-   // Si pas assez de swing points, etre permissif
-   if(shCount < 2 || slCount < 2) return true;
+   m_lastH4Score = score;
+   return score;
+}
 
-   // Structure haussiere H4 : Higher Highs ET Higher Lows
-   bool h4Bullish = (swingHighs[0] > swingHighs[1] && swingLows[0] > swingLows[1]);
-   // Structure baissiere H4 : Lower Highs ET Lower Lows
-   bool h4Bearish = (swingHighs[0] < swingHighs[1] && swingLows[0] < swingLows[1]);
+//+------------------------------------------------------------------+
+//| IMPROVE 3 (2026-04-03): Structure HTF H4 au lieu de EMA retail  |
+//| Option E DEAL: scoring remplace blocage binaire                 |
+//+------------------------------------------------------------------+
+bool CQualityFilters::CheckTrendH4(string direction, double apiConfidence) {
+   if(!m_enableTrendFilter) return true;
 
-   if(direction == "BUY") {
-      // Bloquer BUY uniquement si structure H4 explicitement baissiere
-      if(h4Bearish) {
+   if(!m_enableDEAL) {
+      // Comportement original conservé quand DEAL désactivé
+      double high[], low[];
+      ArraySetAsSeries(high, true);
+      ArraySetAsSeries(low, true);
+
+      if(CopyHigh(m_symbol, PERIOD_H4, 1, 50, high) < 50) return true;
+      if(CopyLow(m_symbol, PERIOD_H4, 1, 50, low) < 50) return true;
+
+      double swingHighs[3], swingLows[3];
+      int shCount = 0, slCount = 0;
+
+      for(int i = 3; i < 47 && (shCount < 3 || slCount < 3); i++) {
+         if(shCount < 3 &&
+            high[i] > high[i-1] && high[i] > high[i-2] && high[i] > high[i+1] && high[i] > high[i+2]) {
+            swingHighs[shCount++] = high[i];
+         }
+         if(slCount < 3 &&
+            low[i] < low[i-1] && low[i] < low[i-2] && low[i] < low[i+1] && low[i] < low[i+2]) {
+            swingLows[slCount++] = low[i];
+         }
+      }
+
+      if(shCount < 2 || slCount < 2) return true;
+
+      bool h4Bullish = (swingHighs[0] > swingHighs[1] && swingLows[0] > swingLows[1]);
+      bool h4Bearish = (swingHighs[0] < swingHighs[1] && swingLows[0] < swingLows[1]);
+
+      if(direction == "BUY" && h4Bearish) {
          Print("H4 structure BLOCK BUY: Lower Highs + Lower Lows on H4");
          return false;
       }
-   } else {
-      // Bloquer SELL uniquement si structure H4 explicitement haussiere
-      if(h4Bullish) {
+      if(direction == "SELL" && h4Bullish) {
          Print("H4 structure BLOCK SELL: Higher Highs + Higher Lows on H4");
          return false;
       }
+      return true;
    }
 
+   // Option E activée : calculer le score, jamais bloquer sauf cas extrême
+   int h4Score = GetH4ScoreContribution(direction, apiConfidence);
+
+   // Seul cas de blocage : H4 fortement contre + API faible
+   if(h4Score <= -25) {
+      Print("[DEAL] H4 score -25 -> blocage maintenu (H4 contre-tendance + API<80%)");
+      return false;
+   }
+
+   Print("[DEAL] H4 score=", h4Score, " -> passage autorise");
    return true;
 }
 
 //+------------------------------------------------------------------+
 //| Check All Filters                                                 |
 //+------------------------------------------------------------------+
-FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPrice, string timingMode = "CLEAR") {
+FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPrice, string timingMode = "CLEAR", double apiConfidence = 60.0) {
    FilterResult result;
    result.passed = false;
    result.blockReason = "";
@@ -635,7 +718,7 @@ FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPric
    if(timingMode == "POST_NEWS_ENTRY") {
       result.trendOK = true;  // Fade autorise — contre-tendance intentionnelle
    } else {
-      result.trendOK = CheckTrendH4(direction);
+      result.trendOK = CheckTrendH4(direction, apiConfidence);
    }
 
    // Metrics
