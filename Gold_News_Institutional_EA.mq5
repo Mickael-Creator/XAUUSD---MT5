@@ -112,6 +112,14 @@ input double FTMO_Initial_Balance = 10000.0;  // Taille du compte FTMO challenge
 input double FTMO_Total_DD_Limit = 9.0;       // % - arret a 9% (limite FTMO 10%)
 
 //+------------------------------------------------------------------+
+//| TEST MODE (B1 Fix 2026-04-14)                                     |
+//+------------------------------------------------------------------+
+input group "=== TEST MODE ==="
+// B1 Fix (2026-04-14): Lot force via input au lieu de hardcode (ancien lots=0.01).
+// Mettre a 0.0 pour desactiver et utiliser le calcul dynamique Risk_Percent.
+input double Phase_Test_Force_Lot = 0.01;   // 0.0 = desactive (utilise Risk_Percent)
+
+//+------------------------------------------------------------------+
 //| SESSION FILTER                                                    |
 //+------------------------------------------------------------------+
 input group "â•â•â• SESSION â•â•â•"
@@ -420,30 +428,56 @@ void OnDeinit(const int reason) {
 //| EXPERT TICK FUNCTION                                              |
 //+------------------------------------------------------------------+
 void OnTick() {
-   // CORRECTION 8: New day reset avec validation
-   datetime today = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
-   if(today > g_DayStart) {  // Utiliser > au lieu de !=
-      Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• NEW TRADING DAY â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
-      g_DayStart = today;
+   // M3 Fix (2026-04-14): Reset journalier base sur TimeGMT() au lieu de TimeCurrent().
+   // Ancien bug: reset a minuit serveur (UTC+2/+3 FTMO), pas a la cloture CME 22:00 GMT.
+   MqlDateTime gmtNow;
+   TimeGMT(gmtNow);
+   static int lastResetDay = -1;
+   if(gmtNow.day != lastResetDay) {
+      Print("=============== NEW TRADING DAY (GMT) ===============");
+      lastResetDay = gmtNow.day;
+      g_DayStart = TimeGMT();
       g_TradesToday = 0;
       g_LocalTradesToday = 0;
       g_DailyPnL = 0;
-      g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);  // FIX C-9.1
-      Print("📅 Nouveau jour FTMO — Balance de référence: ", DoubleToString(g_DayStartBalance, 2));
+      g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      Print("[DAY-RESET] Nouveau jour GMT - Balance de reference: ",
+            DoubleToString(g_DayStartBalance, 2));
 
       // Reset filters daily counters
       if(g_filters != NULL) {
          g_filters.ResetDaily();
       }
-      // PHASE 1 APPROCHE A: Refresh niveaux ICT a chaque nouveau jour
-      // (PDH/PDL glissent, Asian/London a recalculer, Equal H/L a rafraichir)
+      // Refresh niveaux ICT a chaque nouveau jour GMT
       if(g_liquidity != NULL) {
          g_liquidity.RefreshAllLevels();
-         Print("[LIQ] Niveaux ICT refreshed (nouveau jour) — actifs: ",
+         Print("[LIQ] Niveaux ICT refreshed (nouveau jour GMT) - actifs: ",
                g_liquidity.GetLevelCount());
       }
    }
-   
+
+   // M2 Fix (2026-04-14): Refresh Asian Range a 07:00 GMT (fin session Asian).
+   static int lastAsianRefreshDay = -1;
+   if(gmtNow.hour == 7 && gmtNow.min == 0 &&
+      lastAsianRefreshDay != gmtNow.day) {
+      if(g_liquidity != NULL) {
+         g_liquidity.RefreshAllLevels();
+         lastAsianRefreshDay = gmtNow.day;
+         Print("[LIQ] Refresh 07:00 GMT - Asian Range complet");
+      }
+   }
+
+   // M2 Fix (2026-04-14): Refresh London Range a 12:00 GMT (range fige).
+   static int lastLondonRefreshDay = -1;
+   if(gmtNow.hour == 12 && gmtNow.min == 0 &&
+      lastLondonRefreshDay != gmtNow.day) {
+      if(g_liquidity != NULL) {
+         g_liquidity.RefreshAllLevels();
+         lastLondonRefreshDay = gmtNow.day;
+         Print("[LIQ] Refresh 12:00 GMT - London Range complet");
+      }
+   }
+
    // FTMO Safety check
    if(!CheckFTMOLimits()) {
       if(Enable_Dashboard) UpdateDashboard();
@@ -1002,7 +1036,14 @@ void CheckEntry() {
                      ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                      : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-      FilterResult fr = g_filters.CheckAllFilters(direction, price, timingMode, g_Signal.confidence);
+      // B2 Fix (2026-04-14): Propager la confidence effective selon la source.
+      // Ancien bug: g_Signal.confidence=0 en LOCAL/LONDON_RANGE -> DEAL v2 branche <60%.
+      double effectiveConfidence;
+      if(signalSource == "LOCAL")             effectiveConfidence = confidence;     // local.confidence
+      else if(signalSource == "LONDON_RANGE") effectiveConfidence = 65.0;            // plancher DEAL
+      else                                    effectiveConfidence = g_Signal.confidence;
+
+      FilterResult fr = g_filters.CheckAllFilters(direction, price, timingMode, effectiveConfidence);
       if(!fr.passed) {
          static string lastReason = "";
          if(fr.blockReason != lastReason) {
@@ -1175,10 +1216,13 @@ void ExecuteTrade(string direction) {
    Print("[DEAL-v2] Pre-test lots=", DoubleToString(lots, 4),
          " (sizeFactor=", DoubleToString(g_Signal.size_factor, 2), "x)");
 
-   // PHASE TEST (2026-04-13): Force 0.01 lot pendant phase de test
-   // A supprimer quand phase test terminee et DEAL v2 valide
-   lots = 0.01;
-   Print("[TEST-MODE] Lot force a 0.01 — phase de test active");
+   // B1 Fix (2026-04-14): Lot force via input Phase_Test_Force_Lot
+   // Mettre Phase_Test_Force_Lot=0.0 en LIVE pour utiliser Risk_Percent
+   if(Phase_Test_Force_Lot > 0.0) {
+      lots = NormalizeDouble(Phase_Test_Force_Lot, 2);
+      Print("[TEST-MODE] Lot force a ", DoubleToString(lots, 2),
+            " (Phase_Test_Force_Lot)");
+   }
 
    Print("[AUDIT-C4] Final lots: ", DoubleToString(lots, 2));
 

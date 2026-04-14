@@ -618,6 +618,7 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
                   for(int k = 1; k <= 8; k++) {
                      int idx = j - k;
                      if(idx < 0) break;
+                     if(idx == 0) break;  // M1 Fix (2026-04-14): jamais la bougie courante non fermee
                      if(m_close_M15[idx] > lvl.price) {
                         reclaimed  = true;
                         reclaimBar = idx;
@@ -696,6 +697,7 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
                   for(int k = 1; k <= 8; k++) {
                      int idx = j - k;
                      if(idx < 0) break;
+                     if(idx == 0) break;  // M1 Fix (2026-04-14): jamais la bougie courante non fermee
                      if(m_close_M15[idx] < lvl.price) {
                         reclaimed  = true;
                         reclaimBar = idx;

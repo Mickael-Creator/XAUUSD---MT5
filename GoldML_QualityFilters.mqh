@@ -741,6 +741,11 @@ FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPric
    // Le mode POST_NEWS est un fade trade (contre-tendance par design)
    if(timingMode == "POST_NEWS_ENTRY") {
       result.trendOK = true;  // Fade autorise — contre-tendance intentionnelle
+      // B3 Fix (2026-04-14): POST_NEWS bypass H4 -> neutraliser DEAL v2 pour eviter
+      // un m_h4SizeFactor stale (potentiellement 0.0) herite d'un appel precedent.
+      m_h4SizeFactor = 1.0;
+      m_lastH4Score  = 0;
+      Print("[POST_NEWS] H4 bypassed -> sizeFactor=1.0");
    } else {
       result.trendOK = CheckTrendH4(direction, apiConfidence);
    }
