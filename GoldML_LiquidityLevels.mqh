@@ -83,8 +83,11 @@ CLiquidityLevels::~CLiquidityLevels() {
 
 //+------------------------------------------------------------------+
 //| AddLevel — ajoute un niveau, deduplique a 1 pip pres             |
+//| Cap global : 20 niveaux max (garde-fou anti-explosion)           |
 //+------------------------------------------------------------------+
 void CLiquidityLevels::AddLevel(LiquidityLevel &lvl) {
+   if(m_count >= 20) return; // Cap global anti-explosion
+
    double pipSize = SymbolInfoDouble(m_symbol, SYMBOL_POINT) * 10.0;
    if(pipSize <= 0.0) pipSize = 0.01;
 
@@ -306,6 +309,8 @@ void CLiquidityLevels::DetectEqualHighsLows() {
    int    foundBarsL[];
    int    nHigh = 0;
    int    nLow  = 0;
+   int    equalHighCount = 0;      // compteur strict double-ceinture
+   int    equalLowCount  = 0;
    ArrayResize(foundBarsH, MAX_EQL);
    ArrayResize(foundBarsL, MAX_EQL);
 
@@ -328,6 +333,7 @@ void CLiquidityLevels::DetectEqualHighsLows() {
                   }
                if(tooClose) { break; }
 
+               if(equalHighCount >= 3) break; // garde stricte
                double candidate = (highs[i] + highs[j]) / 2.0;
                LiquidityLevel lvl;
                lvl.price     = candidate;
@@ -336,6 +342,7 @@ void CLiquidityLevels::DetectEqualHighsLows() {
                lvl.active    = true;
                lvl.strength  = 65.0;
                AddLevel(lvl);
+               equalHighCount++;
                foundBarsH[nHigh++] = i;
                Print("[LIQ] Equal High detecte: ",
                      DoubleToString(candidate, 2));
@@ -362,6 +369,7 @@ void CLiquidityLevels::DetectEqualHighsLows() {
                   }
                if(tooClose) { break; }
 
+               if(equalLowCount >= 3) break; // garde stricte
                double candidate = (lows[i] + lows[j]) / 2.0;
                LiquidityLevel lvl;
                lvl.price     = candidate;
@@ -370,6 +378,7 @@ void CLiquidityLevels::DetectEqualHighsLows() {
                lvl.active    = true;
                lvl.strength  = 65.0;
                AddLevel(lvl);
+               equalLowCount++;
                foundBarsL[nLow++] = i;
                Print("[LIQ] Equal Low detecte: ",
                      DoubleToString(candidate, 2));
