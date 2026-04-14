@@ -137,7 +137,9 @@ input int    Local_Max_Daily_Trades   = 3;      // Max trades locaux par jour
 input group "=== ICT LIQUIDITY (PHASE 1) ==="
 // Phase 1 : infrastructure seule — niveaux calcules et disponibles
 // mais pas encore branches sur DetectLiquiditySweep (Phase 2).
-input bool   Enable_ICT_Liquidity = false; // Activation reservee a la Phase 2
+// PHASE 2 APPROCHE A (2026-04-14) : activation par defaut — DetectLiquiditySweep_ICT
+// consomme les vrais niveaux PDH/PDL/PWH/PWL/London/Asian/EQL au lieu des pivots 4/4.
+input bool   Enable_ICT_Liquidity = true;  // ON = sweep ICT | OFF = pivots 4/4 (rollback)
 
 //+------------------------------------------------------------------+
 //| DISPLAY                                                           |
@@ -312,6 +314,15 @@ int OnInit() {
             " | flag Enable_ICT_Liquidity=", Enable_ICT_Liquidity ? "ON" : "OFF");
    } else {
       Print("[LIQ] WARNING: echec allocation CLiquidityLevels");
+   }
+
+   // PHASE 2 APPROCHE A (2026-04-14) : injecter niveaux ICT + flag dans le Sniper
+   // (Enable_ICT_Liquidity est un input EA, non visible depuis GoldML_SniperEntry_M15.mqh)
+   if(g_liquidity != NULL && g_sniper != NULL) {
+      g_sniper.SetLiquidity(g_liquidity);
+      g_sniper.SetUseICTLiquidity(Enable_ICT_Liquidity);
+      Print("[PHASE2] g_liquidity passe au Sniper | ICT sweep=",
+            Enable_ICT_Liquidity ? "ON" : "OFF");
    }
 
    // CORRECTION 5: Initial API fetch avec meilleure gestion d'erreur
@@ -1596,13 +1607,19 @@ void UpdateDashboard() {
                                       Local_Max_Daily_Trades,
                                       Enable_Local_Mode ? "ON" : "OFF");
 
+   // PHASE 2 APPROCHE A (2026-04-14) : statut liquidite ICT
+   string liqStatus = StringFormat("ICT Liquidity: %s | Niveaux: %d",
+                                    Enable_ICT_Liquidity ? "ON" : "OFF",
+                                    g_liquidity != NULL ? g_liquidity.GetLevelCount() : 0);
+
    Comment(line1 + "\n\n" +
            sigStatus + "\n" +
            timingStatus + "\n" +
            posStatus + "\n" +
            sniperStatus + "\n" +
            pnlStatus + "\n" +
-           localStatus);
+           localStatus + "\n" +
+           liqStatus);
 }
 
 // FIX N3 (2026-04-03): ExtractString() et ExtractDouble() supprimés (dead code, remplacé par CJsonParser)

@@ -13,6 +13,8 @@
 #property strict
 
 #include "GoldML_ICT_Detector.mqh"
+// PHASE 2 APPROCHE A (2026-04-14) : acces aux niveaux de liquidite ICT
+#include "GoldML_LiquidityLevels.mqh"
 
 //+------------------------------------------------------------------+
 //| ENUMS                                                             |
@@ -141,6 +143,10 @@ private:
    
    // ICT Detector
    CICT_Detector* m_ictDetector;
+
+   // PHASE 2 APPROCHE A (2026-04-14) : niveaux ICT + feature flag
+   CLiquidityLevels* m_liquidity;
+   bool              m_useICTLiquidity;
    
    // Settings
    int      m_swingLookback;
@@ -196,6 +202,8 @@ private:
    void     DetectSwingPoints();
    ENUM_STRUCTURE AnalyzeStructure(string direction);
    LiquiditySweep DetectLiquiditySweep(string direction);
+   // PHASE 2 APPROCHE A (2026-04-14) : sweep ICT vrai (PDH/PDL/PWH/PWL/London/Asian/EQL)
+   LiquiditySweep DetectLiquiditySweep_ICT(string direction);
    // FIX ICT-B3: parametre sweepBar pour garantir BOS apres sweep
    BreakOfStructure DetectBOS(string direction, int sweepBar = -1);
    PullbackZone AnalyzePullback(string direction, BreakOfStructure &bos, string timingMode = "CLEAR");
@@ -224,6 +232,11 @@ public:
    SniperResultM15 AnalyzeEntry(string direction, double confidence, string timingMode);
    SniperResultM15 GetLastResult() { return m_lastResult; }
    void PrintAnalysis(SniperResultM15 &result);
+
+   // PHASE 2 APPROCHE A (2026-04-14) : injection niveaux ICT + flag runtime
+   // (Enable_ICT_Liquidity est un input EA, non accessible depuis la .mqh)
+   void SetLiquidity(CLiquidityLevels* liq)  { m_liquidity = liq; }
+   void SetUseICTLiquidity(bool use)         { m_useICTLiquidity = use; }
 };
 
 //+------------------------------------------------------------------+
@@ -239,6 +252,10 @@ CSniperM15::CSniperM15(string symbol) {
    
    // CORRECTION 1: Initialiser ICT Detector
    m_ictDetector = new CICT_Detector(symbol);
+
+   // PHASE 2 APPROCHE A (2026-04-14)
+   m_liquidity        = NULL;
+   m_useICTLiquidity  = false;
 }
 
 //+------------------------------------------------------------------+
@@ -519,6 +536,226 @@ ENUM_STRUCTURE CSniperM15::AnalyzeStructure(string direction) {
    return STRUCTURE_RANGING;
 }
 
+//+------------------------------------------------------------------+
+//| PHASE 2 APPROCHE A (2026-04-14)                                  |
+//| DetectLiquiditySweep_ICT                                         |
+//|                                                                  |
+//| Nouvelle detection sur vrais niveaux ICT (PDH/PDL/PWH/PWL,       |
+//| Asian/London ranges, Equal Highs/Lows) au lieu des pivots 4/4.   |
+//|  - Reclaim autorise jusqu'a 8 bougies                            |
+//|  - Verification displacement post-reclaim (ATR M15 x 0.4)        |
+//|  - Option 5A : rejet si SL structurel > 45 pips                  |
+//|                                                                  |
+//| NOTE : utilise les arrays caches m_*_M15 (indexes bar 0) pour    |
+//| garantir la coherence du sweepBar avec DetectBOS() (qui lit      |
+//| aussi m_close_M15 / m_high_M15 / m_low_M15).                     |
+//+------------------------------------------------------------------+
+LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
+   LiquiditySweep sweep;
+   sweep.detected       = false;
+   sweep.reclaimed      = false;
+   sweep.sweepBar       = -1;
+   sweep.sweepLevel     = 0;
+   sweep.sweepPrice     = 0;
+   sweep.sweepTime      = 0;
+   sweep.barsSinceSweep = 999;
+   sweep.sweepType      = "NONE";
+
+   if(m_liquidity == NULL) {
+      Print("[SWEEP-ICT] ERREUR: m_liquidity NULL");
+      return sweep;
+   }
+
+   int arraySize = ArraySize(m_close_M15);
+   if(arraySize < 30) {
+      Print("[SWEEP-ICT] Donnees M15 insuffisantes (", arraySize, ")");
+      return sweep;
+   }
+
+   // ATR M15 pour displacement (reutilise le handle cache)
+   double atrVal = 0.0;
+   if(m_hATR_M15 != INVALID_HANDLE) {
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(m_hATR_M15, 0, 1, 3, atr) >= 3) atrVal = atr[0];
+   }
+
+   double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT) * 10.0;
+   if(point <= 0.0) point = 0.01;
+
+   int levelCount = m_liquidity.GetLevelCount();
+
+   // Parcourir les niveaux de liquidite
+   for(int lvlIdx = 0; lvlIdx < levelCount; lvlIdx++) {
+      LiquidityLevel lvl = m_liquidity.GetLevel(lvlIdx);
+      if(!lvl.active) continue;
+
+      // === BUY : sweep sous niveau bullish ===
+      if(direction == "BUY") {
+         bool isBullishLevel = (lvl.type == "PDL"      ||
+                                lvl.type == "PWL"      ||
+                                lvl.type == "ASIAN_L"  ||
+                                lvl.type == "LONDON_L" ||
+                                lvl.type == "EQL_L");
+         if(!isBullishLevel) continue;
+
+         // Chercher bougie qui a penetre sous le niveau (bougies fermees, j>=1)
+         for(int j = 1; j < 25 && j < arraySize; j++) {
+            if(m_low_M15[j] < lvl.price - point * 0.5) {
+               // Wick penetre le niveau
+
+               // Verifier reclaim dans les 8 bougies
+               bool reclaimed  = false;
+               int  reclaimBar = -1;
+
+               // Same candle reclaim
+               if(m_close_M15[j] > lvl.price) {
+                  reclaimed  = true;
+                  reclaimBar = j;
+               }
+               else {
+                  // Multi-candle reclaim jusqu'a 8 bougies (plus recent = index plus petit)
+                  for(int k = 1; k <= 8; k++) {
+                     int idx = j - k;
+                     if(idx < 0) break;
+                     if(m_close_M15[idx] > lvl.price) {
+                        reclaimed  = true;
+                        reclaimBar = idx;
+                        break;
+                     }
+                  }
+               }
+
+               if(!reclaimed) {
+                  Print("[SWEEP-ICT] BUY sweep sur ", lvl.type,
+                        " @ ", DoubleToString(lvl.price, 2),
+                        " — pas de reclaim dans 8 bougies");
+                  continue;
+               }
+
+               // Verifier displacement post-reclaim (info seulement, non bloquant)
+               bool hasDisplacement = false;
+               if(atrVal > 0 && reclaimBar > 0 && reclaimBar - 1 >= 0) {
+                  double body = m_close_M15[reclaimBar - 1] - m_close_M15[reclaimBar];
+                  hasDisplacement = (body >= atrVal * 0.4);
+               }
+
+               // Calculer SL structurel
+               double slPips = (lvl.price - m_low_M15[j]) / point;
+
+               // Option 5A : rejeter si SL > 45 pips
+               if(slPips > 45.0) {
+                  Print("[SWEEP-ICT] BUY sweep rejete: SL ",
+                        DoubleToString(slPips, 1), " pips > 45");
+                  continue;
+               }
+
+               // Sweep valide
+               sweep.detected       = true;
+               sweep.sweepBar       = j;
+               sweep.sweepLevel     = lvl.price;
+               sweep.sweepPrice     = m_low_M15[j];
+               sweep.sweepTime      = m_time_M15[j];
+               sweep.reclaimed      = true;
+               sweep.barsSinceSweep = (reclaimBar >= 0) ? reclaimBar : j;
+               sweep.sweepType      = "ICT_" + lvl.type;
+
+               Print("[SWEEP-ICT] BUY sweep valide!",
+                     " Type=", lvl.type,
+                     " Level=", DoubleToString(lvl.price, 2),
+                     " Low=", DoubleToString(m_low_M15[j], 2),
+                     " SL=", DoubleToString(slPips, 1), "pips",
+                     " Displacement=", (hasDisplacement ? "YES" : "NO"),
+                     " ReclaimBar=", reclaimBar);
+
+               return sweep;
+            }
+         }
+      }
+
+      // === SELL : sweep au-dessus niveau bearish ===
+      else if(direction == "SELL") {
+         bool isBearishLevel = (lvl.type == "PDH"      ||
+                                lvl.type == "PWH"      ||
+                                lvl.type == "ASIAN_H"  ||
+                                lvl.type == "LONDON_H" ||
+                                lvl.type == "EQL_H");
+         if(!isBearishLevel) continue;
+
+         for(int j = 1; j < 25 && j < arraySize; j++) {
+            if(m_high_M15[j] > lvl.price + point * 0.5) {
+
+               bool reclaimed  = false;
+               int  reclaimBar = -1;
+
+               if(m_close_M15[j] < lvl.price) {
+                  reclaimed  = true;
+                  reclaimBar = j;
+               }
+               else {
+                  for(int k = 1; k <= 8; k++) {
+                     int idx = j - k;
+                     if(idx < 0) break;
+                     if(m_close_M15[idx] < lvl.price) {
+                        reclaimed  = true;
+                        reclaimBar = idx;
+                        break;
+                     }
+                  }
+               }
+
+               if(!reclaimed) {
+                  Print("[SWEEP-ICT] SELL sweep sur ", lvl.type,
+                        " @ ", DoubleToString(lvl.price, 2),
+                        " — pas de reclaim");
+                  continue;
+               }
+
+               bool hasDisplacement = false;
+               if(atrVal > 0 && reclaimBar > 0 && reclaimBar - 1 >= 0) {
+                  double body = m_close_M15[reclaimBar] - m_close_M15[reclaimBar - 1];
+                  hasDisplacement = (body >= atrVal * 0.4);
+               }
+
+               double slPips = (m_high_M15[j] - lvl.price) / point;
+               if(slPips > 45.0) {
+                  Print("[SWEEP-ICT] SELL sweep rejete: SL ",
+                        DoubleToString(slPips, 1), " pips > 45");
+                  continue;
+               }
+
+               sweep.detected       = true;
+               sweep.sweepBar       = j;
+               sweep.sweepLevel     = lvl.price;
+               sweep.sweepPrice     = m_high_M15[j];
+               sweep.sweepTime      = m_time_M15[j];
+               sweep.reclaimed      = true;
+               sweep.barsSinceSweep = (reclaimBar >= 0) ? reclaimBar : j;
+               sweep.sweepType      = "ICT_" + lvl.type;
+
+               Print("[SWEEP-ICT] SELL sweep valide!",
+                     " Type=", lvl.type,
+                     " Level=", DoubleToString(lvl.price, 2),
+                     " High=", DoubleToString(m_high_M15[j], 2),
+                     " SL=", DoubleToString(slPips, 1), "pips",
+                     " Displacement=", (hasDisplacement ? "YES" : "NO"),
+                     " ReclaimBar=", reclaimBar);
+
+               return sweep;
+            }
+         }
+      }
+   }
+
+   Print("[SWEEP-ICT] Aucun sweep sur ", levelCount, " niveaux ICT");
+   return sweep;
+}
+
+//+------------------------------------------------------------------+
+//| PHASE2-ANCIEN (2026-04-14)                                       |
+//| Ancienne DetectLiquiditySweep sur pivots 4/4 locaux — conservee  |
+//| intacte pour rollback (appelee quand Enable_ICT_Liquidity=false).|
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 //| Detect Liquidity Sweep                                           |
 //+------------------------------------------------------------------+
@@ -1290,7 +1527,15 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    result.structure = AnalyzeStructure(direction);
    
    // Step 2: Detect Liquidity Sweep
-   result.sweep = DetectLiquiditySweep(direction);
+   // PHASE 2 APPROCHE A (2026-04-14) : flag Enable_ICT_Liquidity (EA) injecte
+   // via SetUseICTLiquidity() — bascule entre pivots 4/4 et niveaux ICT reels.
+   if(m_useICTLiquidity && m_liquidity != NULL) {
+      // NOUVELLE VERSION ICT (PDH/PDL/PWH/PWL/London/Asian/EQL)
+      result.sweep = DetectLiquiditySweep_ICT(direction);
+   } else {
+      // ANCIENNE VERSION conservee (pivots 4/4) — rollback possible
+      result.sweep = DetectLiquiditySweep(direction);
+   }
    
    // SETUP-A (2026-04-04): BOS Direct si H4 forte + confidence elevee
    bool allowBOSDirect = false;
