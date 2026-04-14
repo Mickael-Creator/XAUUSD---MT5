@@ -83,10 +83,13 @@ CLiquidityLevels::~CLiquidityLevels() {
 
 //+------------------------------------------------------------------+
 //| AddLevel — ajoute un niveau, deduplique a 1 pip pres             |
-//| Cap global : 20 niveaux max (garde-fou anti-explosion)           |
+//| Cap absolu : 10 niveaux max (garde-fou anti-explosion)           |
 //+------------------------------------------------------------------+
 void CLiquidityLevels::AddLevel(LiquidityLevel &lvl) {
-   if(m_count >= 20) return; // Cap global anti-explosion
+   if(m_count >= 10) {
+      Print("[LIQ] Cap 10 niveaux atteint — ignore");
+      return;
+   }
 
    double pipSize = SymbolInfoDouble(m_symbol, SYMBOL_POINT) * 10.0;
    if(pipSize <= 0.0) pipSize = 0.01;
@@ -400,7 +403,9 @@ void CLiquidityLevels::RefreshAllLevels() {
    CalculatePWH_PWL();
    CalculateAsianRange();
    CalculateLondonRange();
-   DetectEqualHighsLows();
+   // DetectEqualHighsLows();
+   // TEMPORAIREMENT DESACTIVE — trop de niveaux
+   // A reactiver apres correction complete
 
    Print("[LIQ] Total niveaux actifs: ", m_count);
 }
