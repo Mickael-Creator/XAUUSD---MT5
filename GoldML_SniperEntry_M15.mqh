@@ -1374,12 +1374,65 @@ int CSniperM15::CalculateScore(SniperResultM15 &result) {
       score += 20;
    }
    
-   // Liquidity sweep (30 pts - pillar #1 ICT)
-   // FIX A1 (2026-04-04): BOS Direct bypass = demi-score sweep
+   // Liquidity sweep
+   // FIX A1 (2026-04-04)      : BOS Direct bypass = demi-score sweep (15 pts)
+   // PHASE 4 APPROCHE A (2026-04-14) : scoring tiere selon le niveau ICT
+   //   PWH/PWL=+35  PDH/PDL=+30  London=+25  Asian=+22  EQL=+20
+   //   + bonus displacement post-reclaim (ATR M15 x 0.7 -> +10 / x 0.4 -> +5)
    if(result.sweep.detected && result.sweep.reclaimed) {
       if(result.sweep.sweepType == "BOS_DIRECT_BYPASS") {
          score += 15;  // 15 pts au lieu de 30 pour sweep virtuel
-      } else {
+      }
+      else if(m_useICTLiquidity &&
+              StringFind(result.sweep.sweepType, "ICT_") >= 0) {
+         // Scoring base sur le type de niveau ICT
+         string st = result.sweep.sweepType;
+         if(StringFind(st, "PWH") >= 0 || StringFind(st, "PWL") >= 0) {
+            score += 35;
+            Print("[SCORE-ICT] PWH/PWL sweep: +35 pts");
+         }
+         else if(StringFind(st, "PDH") >= 0 || StringFind(st, "PDL") >= 0) {
+            score += 30;
+            Print("[SCORE-ICT] PDH/PDL sweep: +30 pts");
+         }
+         else if(StringFind(st, "LONDON") >= 0) {
+            score += 25;
+            Print("[SCORE-ICT] London sweep: +25 pts");
+         }
+         else if(StringFind(st, "ASIAN") >= 0) {
+            score += 22;
+            Print("[SCORE-ICT] Asian sweep: +22 pts");
+         }
+         else if(StringFind(st, "EQL") >= 0) {
+            score += 20;
+            Print("[SCORE-ICT] Equal H/L sweep: +20 pts");
+         }
+         else {
+            score += 20;  // Defaut ICT inconnu
+         }
+
+         // Bonus displacement post-reclaim (bougie M15 fermee bar 1)
+         // Reutilise le handle ATR cache + les arrays m_*_M15 deja rafraichis
+         if(m_hATR_M15 != INVALID_HANDLE &&
+            ArraySize(m_close_M15) >= 3) {
+            double atr[];
+            ArraySetAsSeries(atr, true);
+            if(CopyBuffer(m_hATR_M15, 0, 1, 3, atr) >= 3) {
+               double body = MathAbs(m_close_M15[1] - m_close_M15[2]);
+               if(body >= atr[0] * 0.7) {
+                  score += 10;
+                  Print("[SCORE-ICT] Displacement fort: +10 pts");
+               }
+               else if(body >= atr[0] * 0.4) {
+                  score += 5;
+                  Print("[SCORE-ICT] Displacement modere: +5 pts");
+               }
+            }
+         }
+      }
+      else {
+         // PHASE4-ANCIEN (2026-04-14) — NE PAS SUPPRIMER
+         // Scoring pivots 4/4 conserve pour rollback (flag OFF)
          score += 30;
          if(result.sweep.barsSinceSweep <= 5) score += 5;
       }
@@ -1621,7 +1674,26 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    result.entryPrice = price;
    result.stopLoss = CalculateSL(direction, result.sweep);
    result.slPips = MathAbs(result.entryPrice - result.stopLoss) / (point * 10);
-   
+
+   // PHASE 3 APPROCHE A — Option 5A (2026-04-14)
+   // Pour les sweeps ICT (PDH/PDL/PWH/PWL/London/Asian/EQL), le sweepPrice peut
+   // etre tres eloigne du prix actuel -> SL structurel potentiellement > 45 pips.
+   // On rejette le trade en forcant score=0 (le gate Min_Score le filtrera).
+   // m_useICTLiquidity = miroir de Enable_ICT_Liquidity injecte via setter.
+   if(m_useICTLiquidity &&
+      StringFind(result.sweep.sweepType, "ICT_") >= 0) {
+      if(result.slPips > 45.0) {
+         Print("[SL-5A] SL structurel ", DoubleToString(result.slPips, 1),
+               " pips > 45 -> trade rejete (", result.sweep.sweepType, ")");
+         result.score  = 0;
+         result.reason = "SL structurel > 45 pips (Option 5A)";
+         m_lastResult  = result;
+         return result;
+      }
+      Print("[SL-5A] SL structurel ", DoubleToString(result.slPips, 1),
+            " pips OK (", result.sweep.sweepType, ")");
+   }
+
    // Validate
    if(result.score >= m_minScore) {
       result.isValid = true;
