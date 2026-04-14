@@ -28,12 +28,16 @@
 #include "GoldML_QualityFilters.mqh"
 // AUDIT-C1: Robust JSON parser replaces fragile StringFind approach
 #include "GoldML_JsonParser.mqh"
+// PHASE 1 APPROCHE A (2026-04-14): Infrastructure niveaux ICT
+#include "GoldML_LiquidityLevels.mqh"
 
 CTrade trade;
 CPositionInfo posInfo;
 CSniperM15* g_sniper = NULL;
 CPositionManagerV2* g_posMgr = NULL;
 CQualityFilters* g_filters = NULL;
+// PHASE 1 APPROCHE A: infrastructure niveaux ICT (non branchee Phase 1)
+CLiquidityLevels* g_liquidity = NULL;
 
 //+------------------------------------------------------------------+
 //| API CONFIGURATION                                                 |
@@ -126,6 +130,14 @@ input bool   Enable_Local_Mode        = true;   // Activer mode local quand API 
 input double Local_Min_Confidence     = 55.0;   // Confidence minimum en mode local (0-100)
 input double Local_Size_Factor        = 0.7;    // Taille position reduite en mode local
 input int    Local_Max_Daily_Trades   = 3;      // Max trades locaux par jour
+
+//+------------------------------------------------------------------+
+//| ICT LIQUIDITY (PHASE 1 APPROCHE A)                                |
+//+------------------------------------------------------------------+
+input group "=== ICT LIQUIDITY (PHASE 1) ==="
+// Phase 1 : infrastructure seule — niveaux calcules et disponibles
+// mais pas encore branches sur DetectLiquiditySweep (Phase 2).
+input bool   Enable_ICT_Liquidity = false; // Activation reservee a la Phase 2
 
 //+------------------------------------------------------------------+
 //| DISPLAY                                                           |
@@ -288,7 +300,20 @@ int OnInit() {
       return INIT_FAILED;
    }
    Print("âœ… Quality Filters initialized");
-   
+
+   // PHASE 1 APPROCHE A (2026-04-14): Infrastructure niveaux ICT
+   // Creee meme quand Enable_ICT_Liquidity=false pour valider les logs
+   // Phase 2 branchera g_liquidity sur DetectLiquiditySweep()
+   g_liquidity = new CLiquidityLevels(_Symbol);
+   if(g_liquidity != NULL) {
+      g_liquidity.RefreshAllLevels();
+      Print("[LIQ] Infrastructure liquidite ICT initialisee — niveaux: ",
+            g_liquidity.GetLevelCount(),
+            " | flag Enable_ICT_Liquidity=", Enable_ICT_Liquidity ? "ON" : "OFF");
+   } else {
+      Print("[LIQ] WARNING: echec allocation CLiquidityLevels");
+   }
+
    // CORRECTION 5: Initial API fetch avec meilleure gestion d'erreur
    if(FetchNewsSignal()) {
       Print("âœ… API connected - Signal: ", g_Signal.direction, 
@@ -353,7 +378,12 @@ void OnDeinit(const int reason) {
       delete g_filters;
       g_filters = NULL;
    }
-   
+   // PHASE 1 APPROCHE A: cleanup infrastructure ICT
+   if(g_liquidity != NULL) {
+      delete g_liquidity;
+      g_liquidity = NULL;
+   }
+
    Comment("");
    
    // CORRECTION 7: Logs de raison de dÃ©sinit
@@ -393,6 +423,13 @@ void OnTick() {
       // Reset filters daily counters
       if(g_filters != NULL) {
          g_filters.ResetDaily();
+      }
+      // PHASE 1 APPROCHE A: Refresh niveaux ICT a chaque nouveau jour
+      // (PDH/PDL glissent, Asian/London a recalculer, Equal H/L a rafraichir)
+      if(g_liquidity != NULL) {
+         g_liquidity.RefreshAllLevels();
+         Print("[LIQ] Niveaux ICT refreshed (nouveau jour) — actifs: ",
+               g_liquidity.GetLevelCount());
       }
    }
    
