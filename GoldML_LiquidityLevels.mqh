@@ -7,8 +7,9 @@
 //|   - PWH / PWL    (Previous Week High/Low, 7 jours glissants)     |
 //|   - Asian Range  (00:00-07:00 GMT)                               |
 //|   - London Range (07:00-12:00 GMT)                               |
-//|   - Equal Highs/Lows (wicks dans tolerance 0.05 x ATR M15,       |
-//|                       max 5 de chaque, espacement >= 15 pips)   |
+//|   - Equal Highs/Lows (wicks dans tolerance 0.03 x ATR M15,       |
+//|                       max 3 de chaque, espacement >= 10 bougies, |
+//|                       creux entre pivots >= 1.0 x ATR)           |
 //|                                                                  |
 //| Phase 1 : infrastructure seule, non branchee sur                 |
 //| DetectLiquiditySweep. Activation via Enable_ICT_Liquidity        |
@@ -273,8 +274,8 @@ void CLiquidityLevels::CalculateLondonRange() {
 }
 
 //+------------------------------------------------------------------+
-//| DetectEqualHighsLows — wicks egaux (tolerance 0.05 x ATR)        |
-//| Limite : max 5 Equal Highs + 5 Equal Lows, espacement >= 15 pips |
+//| DetectEqualHighsLows — wicks egaux (tolerance 0.03 x ATR)        |
+//| Max 3 de chaque cote, espacement >= 10 bougies M15, creux 1.0xATR|
 //+------------------------------------------------------------------+
 void CLiquidityLevels::DetectEqualHighsLows() {
    int hATR = iATR(m_symbol, PERIOD_M15, 14);
@@ -287,14 +288,10 @@ void CLiquidityLevels::DetectEqualHighsLows() {
       return;
    }
    double atrVal    = atr[0];
-   double tolerance = atrVal * 0.05;
+   double tolerance = atrVal * 0.03;
    IndicatorRelease(hATR);
 
    if(atrVal <= 0.0 || tolerance <= 0.0) return;
-
-   double pipSize = SymbolInfoDouble(m_symbol, SYMBOL_POINT) * 10.0;
-   if(pipSize <= 0.0) pipSize = 0.01;
-   double minSpacing = pipSize * 15.0; // espacement minimum entre 2 EQL
 
    double highs[], lows[];
    ArraySetAsSeries(highs, true);
@@ -303,13 +300,14 @@ void CLiquidityLevels::DetectEqualHighsLows() {
    if(CopyHigh(m_symbol, PERIOD_M15, 1, 100, highs) < 100) return;
    if(CopyLow(m_symbol,  PERIOD_M15, 1, 100, lows)  < 100) return;
 
-   const int MAX_EQL = 5;
-   double foundHighs[];
-   double foundLows[];
+   const int MAX_EQL      = 3;     // max 3 Equal Highs + 3 Equal Lows
+   const int MIN_BAR_GAP  = 10;    // >= 10 bougies M15 (2h30) entre 2 EQL
+   int    foundBarsH[];
+   int    foundBarsL[];
    int    nHigh = 0;
    int    nLow  = 0;
-   ArrayResize(foundHighs, MAX_EQL);
-   ArrayResize(foundLows,  MAX_EQL);
+   ArrayResize(foundBarsH, MAX_EQL);
+   ArrayResize(foundBarsL, MAX_EQL);
 
    // Equal Highs
    for(int i = 5; i < 95 && nHigh < MAX_EQL; i++) {
@@ -319,19 +317,18 @@ void CLiquidityLevels::DetectEqualHighsLows() {
             for(int k = i + 1; k < j; k++)
                if(lows[k] < minBetween) minBetween = lows[k];
 
-            // Creux significatif entre les deux (0.5 x ATR)
-            if(highs[i] - minBetween > atrVal * 0.5) {
-               double candidate = (highs[i] + highs[j]) / 2.0;
-
-               // Espacement minimum vs Equal Highs deja trouves
+            // Creux significatif entre les deux (1.0 x ATR)
+            if(highs[i] - minBetween > atrVal * 1.0) {
+               // Espacement temporel minimum vs Equal Highs deja trouves
                bool tooClose = false;
                for(int n = 0; n < nHigh; n++)
-                  if(MathAbs(foundHighs[n] - candidate) < minSpacing) {
+                  if(MathAbs(foundBarsH[n] - i) < MIN_BAR_GAP) {
                      tooClose = true;
                      break;
                   }
                if(tooClose) { break; }
 
+               double candidate = (highs[i] + highs[j]) / 2.0;
                LiquidityLevel lvl;
                lvl.price     = candidate;
                lvl.type      = "EQL_H";
@@ -339,7 +336,7 @@ void CLiquidityLevels::DetectEqualHighsLows() {
                lvl.active    = true;
                lvl.strength  = 65.0;
                AddLevel(lvl);
-               foundHighs[nHigh++] = candidate;
+               foundBarsH[nHigh++] = i;
                Print("[LIQ] Equal High detecte: ",
                      DoubleToString(candidate, 2));
                break; // un seul par zone
@@ -356,17 +353,16 @@ void CLiquidityLevels::DetectEqualHighsLows() {
             for(int k = i + 1; k < j; k++)
                if(highs[k] > maxBetween) maxBetween = highs[k];
 
-            if(maxBetween - lows[i] > atrVal * 0.5) {
-               double candidate = (lows[i] + lows[j]) / 2.0;
-
+            if(maxBetween - lows[i] > atrVal * 1.0) {
                bool tooClose = false;
                for(int n = 0; n < nLow; n++)
-                  if(MathAbs(foundLows[n] - candidate) < minSpacing) {
+                  if(MathAbs(foundBarsL[n] - i) < MIN_BAR_GAP) {
                      tooClose = true;
                      break;
                   }
                if(tooClose) { break; }
 
+               double candidate = (lows[i] + lows[j]) / 2.0;
                LiquidityLevel lvl;
                lvl.price     = candidate;
                lvl.type      = "EQL_L";
@@ -374,7 +370,7 @@ void CLiquidityLevels::DetectEqualHighsLows() {
                lvl.active    = true;
                lvl.strength  = 65.0;
                AddLevel(lvl);
-               foundLows[nLow++] = candidate;
+               foundBarsL[nLow++] = i;
                Print("[LIQ] Equal Low detecte: ",
                      DoubleToString(candidate, 2));
                break;
