@@ -585,10 +585,15 @@ ENUM_EXIT_REASON CPositionManagerV2::ManagePosition(double currentConviction, bo
    // CHECK 1: NEWS PROTECTION
    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    // FIX M-2.2 (2026-04-03): Fermer en blackout si profit OU si perte > 0.5R
-   // Une position à -0.5R pendant un spike news est dangereuse
+   // P2 VALIDATION (2026-04-15): comportement INTENTIONNEL (audit confirme).
+   // Zone safe [-0.5R, +emergencyLockRR (0.3R)] : on tient la position pendant
+   // le blackout. Hors de cette zone :
+   //   - >= +0.3R : on lock le profit (emergency lock, evite retracement news)
+   //   - <= -0.5R : on coupe la perte (protection FTMO : spike news peut
+   //                doubler la perte, DD journalier critique)
    bool shouldCloseForNews = newsBlackout && (
-      m_position.currentRR >= m_emergencyLockRR ||  // En profit suffisant
-      m_position.currentRR <= -0.5                  // En perte significative (>0.5R)
+      m_position.currentRR >= m_emergencyLockRR ||  // Profit >= 0.3R : lock
+      m_position.currentRR <= -0.5                  // Perte >= 0.5R : cut preemptif
    );
    if(shouldCloseForNews) {
       Print("News protection - closing at ", DoubleToString(m_position.currentRR, 1), "R");

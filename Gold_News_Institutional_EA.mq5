@@ -1037,8 +1037,13 @@ void CheckEntry() {
    //================================================================
    // CONFLICT DETECTOR (VPS macro vs ICT/LOCAL technical)
    // 2026-04-15: Si VPS dit BUY mais pipeline ICT/LOCAL dit SELL
-   // (ou inverse), on accepte le trade mais en reduisant la taille x 0.5.
+   // (ou inverse), on accepte le trade en reduisant la taille.
    // Si Allow_Counter_Signal_Trading = false, on bloque le trade (rollback).
+   //
+   // P1 FIX (2026-04-15): Au lieu de cumuler conflictFactor * dealFactor
+   // (micro-trades 0.175 lot), on applique MIN(conflictFactor, dealFactor)
+   // plus tard (section DEAL v2) -> prend la contrainte la plus restrictive
+   // sans les multiplier.
    //================================================================
    bool signalConflict = false;
    if(g_Signal.direction == "BUY"  && direction == "SELL") signalConflict = true;
@@ -1048,16 +1053,16 @@ void CheckEntry() {
          " | VPS: ", g_Signal.direction,
          " | Conflict: ", (signalConflict ? "YES" : "NO"));
 
+   double conflictFactor = 1.0;
    if(signalConflict) {
       if(!Allow_Counter_Signal_Trading) {
          Print("[CONFLICT] Counter-signal trading disabled (flag=false) -> skip");
          return;
       }
-      sizeFactor *= 0.5;
+      conflictFactor = 0.5;
       Print("[CONFLICT] VPS=", g_Signal.direction,
             " ICT=", direction,
-            " -> sizeFactor reduit x 0.5 = ",
-            DoubleToString(sizeFactor, 2));
+            " -> conflictFactor = 0.5 (combine via MIN avec DEAL)");
    }
 
    //================================================================
@@ -1129,19 +1134,27 @@ void CheckEntry() {
    Print("======================================================");
 
    //================================================================
-   // DEAL v2: Multiplier sizeFactor par le H4 size factor
+   // DEAL v2 + CONFLICT : MIN(conflictFactor, dealFactor) au lieu de cumul
+   // P1 FIX (2026-04-15): evite micro-trades H4 bullish + conflit
+   // (avant: 0.7 * 0.5 * 0.5 = 0.175 | apres: 0.7 * MIN(0.5, 0.5) = 0.35)
    //================================================================
-   if(g_filters != NULL && g_filters.IsEnableDEAL()) {
-      double dealSizeFactor = g_filters.GetH4SizeFactor();
+   double dealSizeFactor = 1.0;
+   bool   dealEnabled    = (g_filters != NULL && g_filters.IsEnableDEAL());
+   if(dealEnabled) {
+      dealSizeFactor = g_filters.GetH4SizeFactor();
       if(dealSizeFactor <= 0.0) {
          Print("[DEAL-v2] sizeFactor=0 -> trade bloque par DEAL");
          return;
       }
-      Print("[DEAL-v2] Size: ", DoubleToString(sizeFactor, 2), "x * DEAL ",
-            DoubleToString(dealSizeFactor, 2), "x = ",
-            DoubleToString(sizeFactor * dealSizeFactor, 2), "x");
-      sizeFactor *= dealSizeFactor;
    }
+
+   double reductionFactor = MathMin(conflictFactor, dealSizeFactor);
+   Print("[SIZE] base=", DoubleToString(sizeFactor, 2), "x",
+         " | conflict=", DoubleToString(conflictFactor, 2), "x",
+         " | DEAL=", DoubleToString(dealSizeFactor, 2), "x",
+         " | MIN=", DoubleToString(reductionFactor, 2), "x",
+         " -> final=", DoubleToString(sizeFactor * reductionFactor, 2), "x");
+   sizeFactor *= reductionFactor;
 
    //================================================================
    // EXECUTE TRADE (override temporaire g_Signal pour les parametres)
@@ -1770,6 +1783,22 @@ void SyncOpenPositions() {
    // FIX C-9.1: Initialiser balance du jour si pas encore fait
    if(g_DayStartBalance <= 0)
       g_DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   // P3 FIX (2026-04-15): Detection mode HEDGE vs NETTING pour audit FTMO.
+   // En HEDGE, PositionsTotal peut contenir plusieurs positions sur le meme
+   // symbole -> le break ci-dessous n'en reprend qu'UNE. Les autres restent
+   // orphelines (non gerees par g_posMgr). Le flux normal (g_InPosition gate)
+   // empeche d'OUVRIR une 2e position, mais si une position manuelle existe
+   // deja au demarrage, elle ne sera pas suivie. Log explicite pour alerte.
+   ENUM_ACCOUNT_MARGIN_MODE marginMode =
+      (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   if(marginMode == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING) {
+      Print("[ACCOUNT] Mode HEDGE detecte - 1 seule position sera reprise");
+   } else if(marginMode == ACCOUNT_MARGIN_MODE_RETAIL_NETTING) {
+      Print("[ACCOUNT] Mode NETTING detecte - position unique garantie");
+   } else {
+      Print("[ACCOUNT] Mode EXCHANGE detecte");
+   }
 
    int total = PositionsTotal();
    for(int i = 0; i < total; i++) {
