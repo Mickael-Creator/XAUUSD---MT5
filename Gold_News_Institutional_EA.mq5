@@ -58,6 +58,10 @@ input group "â•â•â• TRADING RULES â•â•â•"
 input double Min_Confidence = 60.0;        // Minimum confidence pour trader
 input bool   Allow_PreNews_Trading = true; // Autoriser trades prÃ©-news (prudent)
 input bool   Allow_PostNews_Fade = true;   // Autoriser fade post-news
+// 2026-04-15: Bidirectional trading flag
+// true  = EA trade BUY et SELL selon pipeline ICT local (VPS = confidence+timing only)
+// false = EA trade uniquement dans le sens du signal VPS (rollback comportement original)
+input bool   Allow_Counter_Signal_Trading = true;
 
 //+------------------------------------------------------------------+
 //| SNIPER ENTRY SETTINGS (M15 Principal + M5 Confirmation)           |
@@ -960,9 +964,11 @@ void CheckEntry() {
    bool   widerStops;
 
    // PRIORITE 1 : Signal API fort (comportement identique a l'actuel)
+   // 2026-04-15: Filtre directionnel assoupli — accepte toute direction != NONE
+   // (l'ancien filtre bloquait SELL quand le VPS envoyait BUY en permanence).
    bool apiHasSignal = (g_Signal.is_valid &&
                         g_Signal.confidence >= Min_Confidence &&
-                        (g_Signal.direction == "BUY" || g_Signal.direction == "SELL") &&
+                        (g_Signal.direction != "NONE") &&
                         g_Signal.timing_mode != "BLACKOUT" &&
                         (TimeCurrent() - g_Signal.last_update) <= 300);
 
@@ -1027,6 +1033,32 @@ void CheckEntry() {
    // DIRECTION GATE
    //================================================================
    if(direction != "BUY" && direction != "SELL") return;
+
+   //================================================================
+   // CONFLICT DETECTOR (VPS macro vs ICT/LOCAL technical)
+   // 2026-04-15: Si VPS dit BUY mais pipeline ICT/LOCAL dit SELL
+   // (ou inverse), on accepte le trade mais en reduisant la taille x 0.5.
+   // Si Allow_Counter_Signal_Trading = false, on bloque le trade (rollback).
+   //================================================================
+   bool signalConflict = false;
+   if(g_Signal.direction == "BUY"  && direction == "SELL") signalConflict = true;
+   if(g_Signal.direction == "SELL" && direction == "BUY")  signalConflict = true;
+
+   Print("[ENTRY] Direction ICT: ", direction,
+         " | VPS: ", g_Signal.direction,
+         " | Conflict: ", (signalConflict ? "YES" : "NO"));
+
+   if(signalConflict) {
+      if(!Allow_Counter_Signal_Trading) {
+         Print("[CONFLICT] Counter-signal trading disabled (flag=false) -> skip");
+         return;
+      }
+      sizeFactor *= 0.5;
+      Print("[CONFLICT] VPS=", g_Signal.direction,
+            " ICT=", direction,
+            " -> sizeFactor reduit x 0.5 = ",
+            DoubleToString(sizeFactor, 2));
+   }
 
    //================================================================
    // QUALITY FILTERS
