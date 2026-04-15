@@ -1278,6 +1278,30 @@ void ExecuteTrade(string direction) {
    }
    if(lots > maxLot) lots = maxLot;
 
+   // P4b FIX (2026-04-15): Alignement lotStep apres override
+   // (ex: input 0.015 avec lotStep 0.01 -> 0.01). Reutilise les variables
+   // lotStep/minLot/maxLot declarees ligne 1220-1222 (pas de redeclaration).
+   if(lotStep > 0) {
+      double alignedLots = MathFloor(lots / lotStep) * lotStep;
+      alignedLots = NormalizeDouble(alignedLots, 2);
+      if(MathAbs(alignedLots - lots) > 1e-8) {
+         Print("[LOT] Alignement lotStep=", DoubleToString(lotStep, 2),
+               " -> lots=", DoubleToString(alignedLots, 2));
+      }
+      lots = alignedLots;
+   }
+
+   // Re-clamp final apres alignement (lotStep peut avoir ramene sous minLot)
+   if(lots < minLot) {
+      Print("[LOT] Ajuste au minimum broker apres alignement: ",
+            DoubleToString(minLot, 2));
+      lots = minLot;
+   }
+   if(lots > maxLot) {
+      Print("[LOT] Ajuste au maximum broker: ", DoubleToString(maxLot, 2));
+      lots = maxLot;
+   }
+
    Print("[AUDIT-C4] Final lots: ", DoubleToString(lots, 2));
 
    // ---------------------------------------------------------------
