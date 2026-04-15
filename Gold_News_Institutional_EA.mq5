@@ -1269,6 +1269,15 @@ void ExecuteTrade(string direction) {
             " (Phase_Test_Force_Lot)");
    }
 
+   // P4 FIX (2026-04-15): Re-clamp apres override Phase_Test_Force_Lot
+   // pour eviter lot < minLot du broker (ex: input 0.005 avec minLot 0.01)
+   if(lots < minLot) {
+      Print("[LOT] Ajuste au minimum broker: ", DoubleToString(lots, 2),
+            " -> ", DoubleToString(minLot, 2));
+      lots = minLot;
+   }
+   if(lots > maxLot) lots = maxLot;
+
    Print("[AUDIT-C4] Final lots: ", DoubleToString(lots, 2));
 
    // ---------------------------------------------------------------
