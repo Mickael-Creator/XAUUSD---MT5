@@ -67,7 +67,12 @@ input bool   Allow_Counter_Signal_Trading = true;
 //| SNIPER ENTRY SETTINGS (M15 Principal + M5 Confirmation)           |
 //+------------------------------------------------------------------+
 input group "â•â•â• SNIPER ENTRY (SMC M15) â•â•â•"
-input int    Sniper_Swing_Lookback = 24;   // M15: 24 bars = 6 heures
+// FIX 2026-04-17 : 24 -> 80 (20h M15)
+// Raison : DetectSwingPoints limitait endI=swingLookback-minSwingBars (20 bougies)
+// => BOS cherche seulement dans [1, 20] alors que sweep peut etre a 57 bougies.
+// Ce bottleneck rendait Max_Bars_After_BOS=60 sterile.
+// Avec 80 : endI=76, coherent avec fenetre sweep 96 et Max_Bars_After_BOS=60.
+input int    Sniper_Swing_Lookback = 80;   // M15: 80 bars = 20 heures
 input int    Sniper_Min_Swing_Bars = 4;    // M15: Plus de stabilitÃ©
 input double Sniper_Fib_Entry_Min = 0.50;
 input double Sniper_Fib_Entry_Max = 0.786;    // ICT Golden Pocket
@@ -1051,6 +1056,13 @@ void CheckEntry() {
    static datetime g_lastSweepTime     = 0;
    static int      g_sweepSkipCount    = 0;
 
+   // C1 FIX v2 (2026-04-17) : statics remontees au niveau fonction
+   // Raison : static imbrique dans { } -> scope MQL5 non garanti.
+   // Meme pattern que lastRejectReason ci-dessus.
+   static datetime lastSniperRunTime = 0;
+   static datetime lastSniperBarM5   = 0;
+   static string   lastSniperSetup   = "";
+
    // === DETERMINER LA SOURCE DU SIGNAL ===
    string direction;
    double confidence;
@@ -1205,18 +1217,12 @@ void CheckEntry() {
    // Probleme : OnTick tourne 100x/sec -> AnalyzeEntry rejouait l'analyse
    // ICT complete a chaque tick (sweep+BOS+pullback+score) = spam logs.
    // FIX 2026-04-17 (bis) : throttle 30s -> 1 bougie M5 complete (300s).
-   // Sur une meme bougie M5 l'analyse ICT est stable -> sameBar suffit,
-   // tooRecent est redondant. Nouveau setup OU nouvelle bougie -> bypass.
+   // C1 FIX v2 (2026-04-17) : statics au niveau fonction (voir ci-dessus).
+   // signalSource retire du throttle : flip API<->LOCAL bypassait inutilement.
+   // Seule la direction BUY/SELL compte.
    //================================================================
    {
-      static datetime lastSniperRunTime = 0;
-      static datetime lastSniperBarM5   = 0;
-      static string   lastSniperSetup   = "";
       datetime curM5Bar = iTime(_Symbol, PERIOD_M5, 0);
-      // Fix : signalSource retiré du throttle
-      // Raison : flip API<->LOCAL bypass le throttle
-      // -> relance analyse inutilement a chaque flip
-      // Seule la direction BUY/SELL compte
       string   curSetup = direction;
 
       bool sameBar    = (curM5Bar == lastSniperBarM5);
