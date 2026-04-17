@@ -1528,6 +1528,12 @@ void ExecuteTrade(string direction) {
 
       Print("TRADE OPENED - Ticket: ", g_Ticket);
 
+      // FIX 2026-04-17: marquer le niveau ICT comme consomme (anti double-signal)
+      // levelIndex = -1 pour BOS_DIRECT_BYPASS ou ancien sweep pivots -> no-op
+      if(g_liquidity != NULL && g_LastSniper.sweep.levelIndex >= 0) {
+         g_liquidity.MarkLevelSwept(g_LastSniper.sweep.levelIndex);
+      }
+
       // FIX C1 (2026-04-03): Charger la position dans le PositionManager
       // Active le partial TP, breakeven et trailing stop
       if(g_posMgr != NULL) {

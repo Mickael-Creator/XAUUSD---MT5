@@ -58,6 +58,9 @@ struct LiquiditySweep {
    bool     reclaimed;      // Price came back after sweep
    int      barsSinceSweep;
    string   sweepType;      // "HIGH_SWEEP" or "LOW_SWEEP"
+   // FIX 2026-04-17: index du niveau ICT consomme (pour MarkLevelSwept post-trade)
+   // -1 = sweep non-ICT (ancien pivots) ou setup BOS_DIRECT_BYPASS
+   int      levelIndex;
 };
 
 //+------------------------------------------------------------------+
@@ -562,6 +565,7 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
    sweep.sweepTime      = 0;
    sweep.barsSinceSweep = 999;
    sweep.sweepType      = "NONE";
+   sweep.levelIndex     = -1;
 
    if(m_liquidity == NULL) {
       Print("[SWEEP-ICT] ERREUR: m_liquidity NULL");
@@ -663,6 +667,7 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
                sweep.reclaimed      = true;
                sweep.barsSinceSweep = (reclaimBar >= 0) ? reclaimBar : j;
                sweep.sweepType      = "ICT_" + lvl.type;
+               sweep.levelIndex     = lvlIdx;
 
                Print("[SWEEP-ICT] BUY sweep valide!",
                      " Type=", lvl.type,
@@ -738,6 +743,7 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
                sweep.reclaimed      = true;
                sweep.barsSinceSweep = (reclaimBar >= 0) ? reclaimBar : j;
                sweep.sweepType      = "ICT_" + lvl.type;
+               sweep.levelIndex     = lvlIdx;
 
                Print("[SWEEP-ICT] SELL sweep valide!",
                      " Type=", lvl.type,
@@ -775,6 +781,7 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep(string direction) {
    sweep.sweepTime = 0;
    sweep.sweepBar = -1;
    sweep.sweepType = "NONE";
+   sweep.levelIndex = -1;  // Ancien sweep pivots: pas de niveau ICT a marquer
    
    int arraySize = ArraySize(m_close_M15);
    
@@ -1614,6 +1621,7 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
          result.sweep.sweepType = "BOS_DIRECT_BYPASS";
          result.sweep.reclaimed = true;
          result.sweep.barsSinceSweep = 0;
+         result.sweep.levelIndex = -1;  // Bypass: pas de niveau ICT a marquer
          Print("[SETUP-A] BOS Direct active: confidence=", DoubleToString(confidence, 0),
                "% H4 forte -> sweep marque comme valide");
       }

@@ -28,6 +28,9 @@ struct LiquidityLevel {
    datetime timestamp;  // Moment de formation
    bool     active;     // true tant que non sweepe
    double   strength;   // Force 0-100 (PWH/PWL=90, PDH/PDL=80, London=75, Asian=70, EQL=65)
+   // FIX 2026-04-17: tracking de la consommation post-trade
+   bool     swept;      // true si deja utilise pour un trade ouvert
+   datetime sweptAt;    // moment GMT du sweep consomme
 };
 
 //+------------------------------------------------------------------+
@@ -98,6 +101,10 @@ void CLiquidityLevels::AddLevel(LiquidityLevel &lvl) {
       if(MathAbs(m_levels[i].price - lvl.price) < pipSize * 1.0)
          return; // Doublon
    }
+
+   // FIX 2026-04-17: init des champs swept (reset a chaque ajout)
+   lvl.swept   = false;
+   lvl.sweptAt = 0;
 
    ArrayResize(m_levels, m_count + 1);
    m_levels[m_count] = lvl;
@@ -497,6 +504,12 @@ bool CLiquidityLevels::FindNearestBearishLevel(double currentPrice,
 //+------------------------------------------------------------------+
 void CLiquidityLevels::MarkLevelSwept(int index) {
    if(index < 0 || index >= m_count) return;
-   m_levels[index].active = false;
+   // FIX 2026-04-17: marquer + horodater + desactiver pour eviter double-signal
+   m_levels[index].swept   = true;
+   m_levels[index].sweptAt = TimeGMT();
+   m_levels[index].active  = false;
+   Print("[LIQ] Niveau sweepe et desactive: ",
+         m_levels[index].type, " @ ",
+         DoubleToString(m_levels[index].price, 2));
 }
 //+------------------------------------------------------------------+
