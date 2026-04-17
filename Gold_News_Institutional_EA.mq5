@@ -1202,8 +1202,9 @@ void CheckEntry() {
    // C1 FIX (2026-04-17) : THROTTLE AVANT AnalyzeEntry
    // Probleme : OnTick tourne 100x/sec -> AnalyzeEntry rejouait l'analyse
    // ICT complete a chaque tick (sweep+BOS+pullback+score) = spam logs.
-   // Solution : analyser au plus une fois par bougie M5 (5 min) ET
-   // au moins 30s entre 2 analyses pour le meme setup (direction+source).
+   // FIX 2026-04-17 (bis) : throttle 30s -> 1 bougie M5 complete (300s).
+   // Sur une meme bougie M5 l'analyse ICT est stable -> sameBar suffit,
+   // tooRecent est redondant. Nouveau setup OU nouvelle bougie -> bypass.
    //================================================================
    {
       static datetime lastSniperRunTime = 0;
@@ -1214,9 +1215,8 @@ void CheckEntry() {
 
       bool sameBar    = (curM5Bar == lastSniperBarM5);
       bool sameSetup  = (curSetup == lastSniperSetup);
-      bool tooRecent  = (TimeGMT() - lastSniperRunTime < 30);
 
-      if(sameBar && sameSetup && tooRecent) {
+      if(sameBar && sameSetup) {
          g_sweepSkipCount++;
          if(g_sweepSkipCount % 100 == 0) {
             Print("[SWEEP] Skip analyse: meme bougie M5 + meme setup ",
@@ -1226,7 +1226,7 @@ void CheckEntry() {
          return;  // Skip AnalyzeEntry et tout downstream
       }
 
-      // Nouveau setup OU nouvelle bougie M5 OU >= 30s -> on analyse
+      // Nouveau setup OU nouvelle bougie M5 -> on analyse
       lastSniperRunTime = TimeGMT();
       lastSniperBarM5   = curM5Bar;
       lastSniperSetup   = curSetup;
