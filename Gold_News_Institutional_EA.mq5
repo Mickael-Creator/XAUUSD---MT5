@@ -73,7 +73,9 @@ input double Sniper_Fib_Entry_Min = 0.50;
 input double Sniper_Fib_Entry_Max = 0.786;    // ICT Golden Pocket
 input double Sniper_Fib_Optimal = 0.618;
 input int    Sniper_Max_Bars_After_BOS = 12;  // M15: 12 bars = 3 heures
-input int    Sniper_Max_Bars_After_Sweep = 20; // M15: Plus de temps
+// FIX 2026-04-17 : 20 -> 60 (15h) cohérent avec fenêtre sweep 96 bougies (24h)
+// Donne plus de temps au BOS de se former après un sweep ancien.
+input int    Sniper_Max_Bars_After_Sweep = 60; // M15: 60 bougies = 15h
 input bool   Sniper_Require_Sweep = true;
 input bool   Sniper_Require_BOS = true;
 input double Sniper_Min_RR = 2.0;

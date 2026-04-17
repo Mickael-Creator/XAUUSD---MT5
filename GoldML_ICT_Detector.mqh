@@ -80,7 +80,8 @@ public:
                      double atrMult,
                      ICT_PDArray &outPd);
    
-   bool IsMitigated(const double price, const ICT_PDArray &pd);
+   // FIX P2 (2026-04-17) : tolerance optionnelle (typiquement 0.1 x ATR M5)
+   bool IsMitigated(const double price, const ICT_PDArray &pd, const double tolerance = 0.0);
    
    ICT_Shift DetectShiftM5(const string direction,
                            const double &open[], const double &close[],
@@ -417,14 +418,17 @@ bool CICT_Detector::FindLatestOB(const string direction,
 //+------------------------------------------------------------------+
 //| Is Mitigated                                                      |
 //+------------------------------------------------------------------+
-bool CICT_Detector::IsMitigated(const double price, const ICT_PDArray &pd)
+bool CICT_Detector::IsMitigated(const double price, const ICT_PDArray &pd, const double tolerance)
 {
    if(!pd.found) return false;
-   
+
    // CORRECTION 16: Validation des limites de zone
    if(pd.zoneHigh <= pd.zoneLow) return false;
-   
-   return (price >= pd.zoneLow && price <= pd.zoneHigh);
+
+   // P2 (2026-04-17) : tolerance 0.1 x ATR pour eviter de rater une mitigation
+   // marginale (prix juste au-dessus/dessous de la zone par 0.2-0.5 pip).
+   const double tol = (tolerance > 0.0) ? tolerance : 0.0;
+   return (price >= pd.zoneLow - tol && price <= pd.zoneHigh + tol);
 }
 
 //+------------------------------------------------------------------+
@@ -456,28 +460,38 @@ ICT_Shift CICT_Detector::DetectShiftM5(const string direction,
    double pivot = 0;
    int pivBar = -1;
 
+   // FIX P1 (2026-04-17) : CHoCH valide sur les 3 dernieres bougies fermees
+   // au lieu de close[1] uniquement (etait trop restrictif : ratait CHoCH
+   // formes 1-2 bougies plus tot pendant l'attente d'un tick).
+   const int CHOCH_BARS = 3;
+
    if(direction == "BUY")
    {
       // CHoCH: break au-dessus du pivot high rÃ©cent
       if(!FindRecentPivotHigh(high, lookbackBars, pivot, pivBar, 2, 2)) return s;
-      
+
       // CORRECTION 18: VÃ©rifier que close[1] existe
       if(n < 2) return s;
-      
-      if(close[1] > pivot)
+
+      // P1 : scanner close[1..3], retourner le plus recent
+      for(int k = 1; k <= CHOCH_BARS && k < n; k++)
       {
-         s.choch = true;
-         s.breakLevel = pivot;
-         s.time = time[1];
-         s.bar = 1;
-         
-         // CORRECTION 19: Validation range
-         double rng = high[1] - low[1];
-         if(rng < 0) rng = 0;  // SÃ©curitÃ©
-         
-         // BOS si impulsif (range > 1.2 ATR)
-         if(atr > 0 && rng >= 1.2 * atr) {
-            s.bos = true;
+         if(close[k] > pivot)
+         {
+            s.choch = true;
+            s.breakLevel = pivot;
+            s.time = time[k];
+            s.bar = k;
+
+            // CORRECTION 19: Validation range
+            double rng = high[k] - low[k];
+            if(rng < 0) rng = 0;  // SÃ©curitÃ©
+
+            // BOS si impulsif (range > 1.2 ATR)
+            if(atr > 0 && rng >= 1.2 * atr) {
+               s.bos = true;
+            }
+            break; // CHoCH le plus recent retenu
          }
       }
    }
@@ -485,25 +499,29 @@ ICT_Shift CICT_Detector::DetectShiftM5(const string direction,
    {
       // CHoCH: break en-dessous du pivot low rÃ©cent
       if(!FindRecentPivotLow(low, lookbackBars, pivot, pivBar, 2, 2)) return s;
-      
+
       if(n < 2) return s;
-      
-      if(close[1] < pivot)
+
+      for(int k = 1; k <= CHOCH_BARS && k < n; k++)
       {
-         s.choch = true;
-         s.breakLevel = pivot;
-         s.time = time[1];
-         s.bar = 1;
-         
-         double rng = high[1] - low[1];
-         if(rng < 0) rng = 0;
-         
-         if(atr > 0 && rng >= 1.2 * atr) {
-            s.bos = true;
+         if(close[k] < pivot)
+         {
+            s.choch = true;
+            s.breakLevel = pivot;
+            s.time = time[k];
+            s.bar = k;
+
+            double rng = high[k] - low[k];
+            if(rng < 0) rng = 0;
+
+            if(atr > 0 && rng >= 1.2 * atr) {
+               s.bos = true;
+            }
+            break;
          }
       }
    }
-   
+
    return s;
 }
 

@@ -935,7 +935,8 @@ BreakOfStructure CSniperM15::DetectBOS(string direction, int sweepBar) {
          // CORRECTION 12: Limites correctes
          // FIX ICT-B3: Si sweepBar fourni, ne chercher le BOS que APRES le sweep (j < sweepBar)
          // En ICT : Sweep se produit D'ABORD, puis le BOS confirme le retournement
-         int maxJ = MathMin(swingBar, m_maxBarsAfterBOS + 5);
+         // FIX P3 (2026-04-17) : marge +5 -> +10 pour cohérence fenêtre sweep 96
+         int maxJ = MathMin(swingBar, m_maxBarsAfterBOS + 10);
          if(sweepBar > 0) maxJ = MathMin(maxJ, sweepBar);
 
          // FIX ICT-B1 (2026-04-03): BOS uniquement sur bougies fermees (j>=1)
@@ -977,7 +978,8 @@ BreakOfStructure CSniperM15::DetectBOS(string direction, int sweepBar) {
          int swingBar = m_swingLows[i].barIndex;
 
          // FIX ICT-B3: Limite temporelle sweep
-         int maxJ = MathMin(swingBar, m_maxBarsAfterBOS + 5);
+         // FIX P3 (2026-04-17) : marge +5 -> +10 pour cohérence fenêtre sweep 96
+         int maxJ = MathMin(swingBar, m_maxBarsAfterBOS + 10);
          if(sweepBar > 0) maxJ = MathMin(maxJ, sweepBar);
 
          // FIX ICT-B1 (2026-04-03): BOS uniquement sur bougies fermees (j>=1)
@@ -1070,6 +1072,10 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos
       return zone;
    }
 
+   // FIX P2 (2026-04-17) : tolerance 0.1 x ATR M5 pour mitigation
+   // Evite de rater un setup quand le prix sort de la zone par 0.2-0.5 pip.
+   double atrTolerance = atr * 0.1;
+
    // 1) Find PD array on M5 using ICT Detector
    ICT_PDArray fvg, ob;
    bool hasFVG = m_ictDetector.FindLatestFVG(direction, m_high_M5, m_low_M5, m_time_M5, 80, fvg);
@@ -1078,11 +1084,11 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos
    ICT_PDArray pd;
    pd.found = false;
 
-   // Priority: mitigated zone > closest zone
-   if(hasFVG && m_ictDetector.IsMitigated(price, fvg)) {
+   // Priority: mitigated zone > closest zone (avec tolerance P2)
+   if(hasFVG && m_ictDetector.IsMitigated(price, fvg, atrTolerance)) {
       pd = fvg;
    }
-   else if(hasOB && m_ictDetector.IsMitigated(price, ob)) {
+   else if(hasOB && m_ictDetector.IsMitigated(price, ob, atrTolerance)) {
       pd = ob;
    }
    else if(hasFVG && !hasOB) {
@@ -1109,8 +1115,8 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos
    zone.pdStrength = pd.strength;
    zone.fibLevel = pd.strength / 100.0; // Legacy mapping
 
-   // 2) Mitigation check
-   zone.mitigated = m_ictDetector.IsMitigated(price, pd);
+   // 2) Mitigation check (avec tolerance P2)
+   zone.mitigated = m_ictDetector.IsMitigated(price, pd, atrTolerance);
 
    if(!zone.mitigated) {
       zone.inZone = false;
