@@ -549,7 +549,7 @@ ENUM_STRUCTURE CSniperM15::AnalyzeStructure(string direction) {
 //| Asian/London ranges, Equal Highs/Lows) au lieu des pivots 4/4.   |
 //|  - Reclaim autorise jusqu'a 8 bougies                            |
 //|  - Verification displacement post-reclaim (ATR M15 x 0.4)        |
-//|  - Option 5A : rejet si SL structurel > 45 pips                  |
+//|  - Option 5A : rejet si SL structurel > 55 pips (FIX 2026-04-17) |
 //|                                                                  |
 //| NOTE : utilise les arrays caches m_*_M15 (indexes bar 0) pour    |
 //| garantir la coherence du sweepBar avec DetectBOS() (qui lit      |
@@ -651,10 +651,12 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
                // Calculer SL structurel
                double slPips = (lvl.price - m_low_M15[j]) / point;
 
-               // Option 5A : rejeter si SL > 45 pips
-               if(slPips > 45.0) {
+               // Option 5A : rejeter si SL > 55 pips
+               // FIX 2026-04-17 : 45 -> 55 pips (Gold FTMO spread 50-65 pts)
+               // 45 trop serre pour PDH/PDL/PWH/PWL sur Gold volatil
+               if(slPips > 55.0) {
                   Print("[SWEEP-ICT] BUY sweep rejete: SL ",
-                        DoubleToString(slPips, 1), " pips > 45");
+                        DoubleToString(slPips, 1), " pips > 55");
                   continue;
                }
 
@@ -729,9 +731,10 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
                }
 
                double slPips = (m_high_M15[j] - lvl.price) / point;
-               if(slPips > 45.0) {
+               // FIX 2026-04-17 : 45 -> 55 pips (Gold FTMO spread 50-65 pts)
+               if(slPips > 55.0) {
                   Print("[SWEEP-ICT] SELL sweep rejete: SL ",
-                        DoubleToString(slPips, 1), " pips > 45");
+                        DoubleToString(slPips, 1), " pips > 55");
                   continue;
                }
 
@@ -1035,6 +1038,14 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos
 
    if(!bos.detected) return zone;
 
+   // C3 (2026-04-17) : log d'entree pullback (deduplication anti-spam)
+   {
+      static string lastPbStartLog = "";
+      string sp = "[PULLBACK] Recherche FVG/OB sur M5... | Bougies M5 disponibles: " +
+                  IntegerToString(ArraySize(m_close_M5));
+      if(sp != lastPbStartLog) { Print(sp); lastPbStartLog = sp; }
+   }
+
    // CORRECTION 14: VÃ©rifier ICT Detector existe
    if(m_ictDetector == NULL) {
       Print("âš ï¸ AnalyzePullback: ICT Detector NULL");
@@ -1165,6 +1176,17 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos
       }
    } else {
       zone.inZone = (zone.mitigated && zone.chochM5);
+   }
+
+   // C3 (2026-04-17) : log de sortie pullback (deduplication anti-spam)
+   {
+      static string lastPbEndLog = "";
+      string se = "[PULLBACK] Resultat: inZone=" + (zone.inZone ? "OUI" : "NON") +
+                  " | chochM5=" + (zone.chochM5 ? "OUI" : "NON") +
+                  " | fvgFound=" + (hasFVG ? "OUI" : "NON") +
+                  " | obFound=" + (hasOB ? "OUI" : "NON") +
+                  " | mitigated=" + (zone.mitigated ? "OUI" : "NON");
+      if(se != lastPbEndLog) { Print(se); lastPbEndLog = se; }
    }
 
    return zone;
@@ -1515,7 +1537,19 @@ int CSniperM15::CalculateScore(SniperResultM15 &result) {
    // Le score H4 est integre via CheckTrendH4 qui autorise/bloque
    // L ajustement fin se fait via le scoreThreshold
 
-   return MathMin(100, MathMax(0, score));
+   int finalScore = (int)MathMin(100, MathMax(0, score));
+
+   // C3 (2026-04-17) : log score final + raison blocage (dedup anti-spam)
+   {
+      static string lastScoreLog = "";
+      string sc = "[SNIPER] Score final: " + IntegerToString(finalScore) +
+                  " | Seuil: " + IntegerToString(m_minScore) +
+                  " | Valid: " + (finalScore >= m_minScore ? "YES" : "NO") +
+                  " | Raison blocage: " + (finalScore < m_minScore ? "Score insuffisant" : "OK");
+      if(sc != lastScoreLog) { Print(sc); lastScoreLog = sc; }
+   }
+
+   return finalScore;
 }
 
 //+------------------------------------------------------------------+
@@ -1678,6 +1712,10 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    if(result.bos.detected) {
       string s = "[SNIPER] BOS: confirme " + result.bos.direction;
       if(s != lastSniperLog) { Print(s); lastSniperLog = s; }
+      // C3 (2026-04-17) : log explicite avant pullback pour debug pipeline
+      static string lastPostBosLog = "";
+      string sb = "[SNIPER] Post-BOS -> lancement AnalyzePullback...";
+      if(sb != lastPostBosLog) { Print(sb); lastPostBosLog = sb; }
    }
    
    if(result.bos.detected && !result.bos.confirmed) {
@@ -1719,17 +1757,18 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    result.slPips = MathAbs(result.entryPrice - result.stopLoss) / (point * 10);
 
    // PHASE 3 APPROCHE A — Option 5A (2026-04-14)
+   // FIX 2026-04-17 : seuil 45 -> 55 pips (Gold FTMO spread 50-65 pts)
    // Pour les sweeps ICT (PDH/PDL/PWH/PWL/London/Asian/EQL), le sweepPrice peut
-   // etre tres eloigne du prix actuel -> SL structurel potentiellement > 45 pips.
+   // etre tres eloigne du prix actuel -> SL structurel potentiellement > 55 pips.
    // On rejette le trade en forcant score=0 (le gate Min_Score le filtrera).
    // m_useICTLiquidity = miroir de Enable_ICT_Liquidity injecte via setter.
    if(m_useICTLiquidity &&
       StringFind(result.sweep.sweepType, "ICT_") >= 0) {
-      if(result.slPips > 45.0) {
+      if(result.slPips > 55.0) {
          Print("[SL-5A] SL structurel ", DoubleToString(result.slPips, 1),
-               " pips > 45 -> trade rejete (", result.sweep.sweepType, ")");
+               " pips > 55 -> trade rejete (", result.sweep.sweepType, ")");
          result.score  = 0;
-         result.reason = "SL structurel > 45 pips (Option 5A)";
+         result.reason = "SL structurel > 55 pips (Option 5A)";
          m_lastResult  = result;
          return result;
       }

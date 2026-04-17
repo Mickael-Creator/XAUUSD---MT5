@@ -87,7 +87,10 @@ input int    Sniper_Min_Score = 55;        // Abaissé après recalibrage scorin
 input double Sniper_Max_Spread = 7.0;      // FTMO XAUUSD : seuil 7 pips = marge securite
 input double Sniper_SL_Buffer_Pips = 3.0;  // M15: Buffer plus large
 input double Sniper_SL_Min_Pips = 25.0;    // M15: SL minimum (evite stop hunts news)
-input double Sniper_SL_Max_Pips = 45.0;    // M15: SL max (partial TP toujours viable)
+// Max SL etendu 45 -> 55 pips (2026-04-17)
+// Gold FTMO spread 50-65 pts impose SL minimum realiste
+// Coherent avec filtre Option 5A SL-5A dans Sniper (seuil 55)
+input double Sniper_SL_Max_Pips = 55.0;    // M15: SL max (partial TP toujours viable)
 input bool   Use_M5_Confirmation = true;   // Confirmation pattern M5
 
 //+------------------------------------------------------------------+
@@ -1038,6 +1041,14 @@ void CheckEntry() {
    static string lastRejectReason = "";
    #define REJECT(rsn) { string _rj=rsn; if(_rj!=lastRejectReason){Print("[REJECT] ",_rj);lastRejectReason=_rj;} return; }
 
+   // C2 (2026-04-17) : anti-repetition sweep deja analyse
+   // Si le meme sweep (type+prix) reste detecte sans changement pendant 60s,
+   // on coupe court a l'analyse pour ne pas spammer les logs.
+   // Resampling : tous les 50 ticks, on imprime un heartbeat.
+   static string   g_lastSweepDetected = "";
+   static datetime g_lastSweepTime     = 0;
+   static int      g_sweepSkipCount    = 0;
+
    // === DETERMINER LA SOURCE DU SIGNAL ===
    string direction;
    double confidence;
@@ -1188,6 +1199,29 @@ void CheckEntry() {
    if(signalSource == "LOCAL")           scoreThreshold = 60;
 
    g_LastSniper = g_sniper.AnalyzeEntry(direction, confidence, timingMode);
+
+   // C2 (2026-04-17) : anti-repetition logs si meme sweep persiste
+   if(g_LastSniper.sweep.detected) {
+      string sweepKey = g_LastSniper.sweep.sweepType +
+                        DoubleToString(g_LastSniper.sweep.sweepPrice, 2);
+
+      // Meme sweep dans la derniere minute -> skip rejet log spam
+      if(sweepKey == g_lastSweepDetected &&
+         TimeGMT() - g_lastSweepTime < 60) {
+         g_sweepSkipCount++;
+         if(g_sweepSkipCount % 50 == 0) {
+            Print("[SWEEP] Meme setup en attente depuis ",
+                  (int)(TimeGMT() - g_lastSweepTime), "s (",
+                  g_sweepSkipCount, " ticks)");
+         }
+         return;  // skip rejet detaille (BOS/pullback/score) - meme etat
+      }
+
+      // Nouveau sweep -> reset compteur
+      g_lastSweepDetected = sweepKey;
+      g_lastSweepTime     = TimeGMT();
+      g_sweepSkipCount    = 0;
+   }
 
    if(g_LastSniper.score < scoreThreshold)
       REJECT("Score " + IntegerToString(g_LastSniper.score) + "<" + IntegerToString(scoreThreshold) + " (" + g_LastSniper.reason + ")");
