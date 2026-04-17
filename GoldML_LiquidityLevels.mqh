@@ -429,7 +429,15 @@ void CLiquidityLevels::RefreshAllLevels() {
    // Cap absolu m_count <= 10 niveaux toujours actif (AddLevel)
    DetectEqualHighsLows();
 
-   Print("[LIQ] Total niveaux actifs: ", m_count);
+   // LOG D (2026-04-17) : detail des niveaux ICT actifs apres refresh
+   Print("== NIVEAUX ICT ACTIFS ==");
+   for(int i = 0; i < m_count; i++) {
+      Print("  [", m_levels[i].type, "] ",
+            DoubleToString(m_levels[i].price, 2),
+            " | Force: ", DoubleToString(m_levels[i].strength, 0),
+            " | Actif: ", m_levels[i].active ? "OUI" : "NON");
+   }
+   Print("== Total: ", m_count, " niveaux ==");
 }
 
 //+------------------------------------------------------------------+

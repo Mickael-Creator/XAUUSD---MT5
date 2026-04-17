@@ -194,6 +194,9 @@ public:
    bool IsEnableDEAL()  { return m_enableDEAL; }
    double GetH4SizeFactor() { return m_h4SizeFactor; }
 
+   // Diagnostic helper (Log A) : expose le test de session sans le filtre on/off
+   bool IsInSession() { return InTradingSession(); }
+
    // Manual overrides
    void ResetConsecutive();
    void ResetDaily();

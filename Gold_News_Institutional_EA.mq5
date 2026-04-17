@@ -369,7 +369,27 @@ int OnInit() {
       Print("WARNING: Local signal handles invalides");
    else
       Print("Local signal handles initialises");
-   
+
+   //================================================================
+   // LOG E (2026-04-17) : SUMMARY DEMARRAGE EA
+   // Recapitulatif config pour debug rapide
+   //================================================================
+   Print("== GOLD INSTITUTIONAL EA - CONFIG ==");
+   Print("  Version: v2.1 | Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
+   Print("  Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
+         " | Equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
+   Print("  Session: ", Session_Start, " - ", Session_End, " GMT");
+   Print("  Max Spread: ", DoubleToString(Sniper_Max_Spread, 1), " pips");
+   Print("  Risk: ", DoubleToString(Risk_Percent, 1), "%",
+         " | Test Lot: ", DoubleToString(Phase_Test_Force_Lot, 2));
+   Print("  ICT Liquidity: ", Enable_ICT_Liquidity ? "ON" : "OFF",
+         " | DEAL v2: ON | Bidirectionnel: ",
+         Allow_Counter_Signal_Trading ? "ON" : "OFF");
+   Print("  Min Score: ", Sniper_Min_Score,
+         " | Max SL: ", DoubleToString(Sniper_SL_Max_Pips, 0), " pips",
+         " | Reclaim: 8 bougies | Scan sweep: 96 bougies (24h)");
+   Print("====================================");
+
    Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
    Print("   READY - Waiting for signals...");
    Print("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
@@ -488,6 +508,51 @@ void OnTick() {
          lastLondonRefreshDay = gmtNow.day;
          Print("[LIQ] Refresh 12:00 GMT - London Range complet");
       }
+   }
+
+   //================================================================
+   // LOG A (2026-04-17) : DIAGNOSTIC SYNTHESE TOUTES LES 60s
+   // Permet de comprendre en temps reel l'etat global du systeme
+   //================================================================
+   static datetime lastDiagLog = 0;
+   if(TimeCurrent() - lastDiagLog >= 60) {
+      lastDiagLog = TimeCurrent();
+
+      double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      if(pt <= 0.0) pt = 0.01;
+      double spreadPips = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
+                           SymbolInfoDouble(_Symbol, SYMBOL_BID)) / (pt * 10.0);
+
+      string sessStatus = "?";
+      if(g_filters != NULL) sessStatus = g_filters.IsInSession() ? "OPEN" : "CLOSED";
+
+      string h4Status = "?";
+      if(g_filters != NULL) {
+         int h4s = g_filters.GetLastH4Score();
+         if(h4s > 0)         h4Status = "BULLISH";
+         else if(h4s < -10)  h4Status = "BEARISH";
+         else                h4Status = "RANGING";
+      }
+
+      double ddPct = 0.0;
+      if(g_DayStartBalance > 0.0)
+         ddPct = (g_DayStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) /
+                 g_DayStartBalance * 100.0;
+
+      Print("== DIAGNOSTIC ==");
+      Print("  Gold: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), 2),
+            " | Spread: ", DoubleToString(spreadPips, 1), " pips",
+            " | Session: ", sessStatus);
+      Print("  Signal VPS: ", g_Signal.direction, " ",
+            DoubleToString(g_Signal.confidence, 0), "%",
+            " | H4: ", h4Status);
+      Print("  Niveaux ICT: ", g_liquidity != NULL ?
+            IntegerToString(g_liquidity.GetLevelCount()) : "0",
+            " | Position: ", g_InPosition ? "ACTIVE" : "NONE");
+      Print("  Trades: ", g_TradesToday, "/", (int)Max_Daily_Trades,
+            " | PnL jour: ", DoubleToString(g_DailyPnL, 2), " EUR",
+            " | DD: ", DoubleToString(ddPct, 2), "%");
+      Print("================");
    }
 
    // FTMO Safety check
@@ -962,6 +1027,11 @@ LocalSignal GetLocalSignal() {
 //+------------------------------------------------------------------+
 void CheckEntry() {
 
+   // LOG B (2026-04-17) : tracer la raison exacte de chaque rejet
+   // Deduplication : on ne log que si le motif change (anti-spam tick)
+   static string lastRejectReason = "";
+   #define REJECT(rsn) { string _rj=rsn; if(_rj!=lastRejectReason){Print("[REJECT] ",_rj);lastRejectReason=_rj;} return; }
+
    // === DETERMINER LA SOURCE DU SIGNAL ===
    string direction;
    double confidence;
@@ -992,10 +1062,12 @@ void CheckEntry() {
    // PRIORITE 2 : Mode local (quand API silencieuse, timing CLEAR)
    else if(Enable_Local_Mode) {
       // Bloquer si BLACKOUT API (meme sans signal fort)
-      if(g_Signal.is_valid && g_Signal.timing_mode == "BLACKOUT") return;
+      if(g_Signal.is_valid && g_Signal.timing_mode == "BLACKOUT")
+         REJECT("BLACKOUT API actif (mode LOCAL)");
 
       // Limiter les trades locaux journaliers
-      if(g_LocalTradesToday >= Local_Max_Daily_Trades) return;
+      if(g_LocalTradesToday >= Local_Max_Daily_Trades)
+         REJECT("Local trades epuises " + IntegerToString(g_LocalTradesToday) + "/" + IntegerToString(Local_Max_Daily_Trades));
 
       // SETUP-C: London Range Breakout (priorite sur signal local classique)
       LondonRangeSignal londonRange = DetectLondonRangeSetup();
@@ -1010,7 +1082,8 @@ void CheckEntry() {
       } else {
          // Signal local classique (H4 + EMA)
          LocalSignal local = GetLocalSignal();
-         if(local.direction == "NONE" || local.confidence < Local_Min_Confidence) return;
+         if(local.direction == "NONE" || local.confidence < Local_Min_Confidence)
+            REJECT("LOCAL signal absent ou conf<" + DoubleToString(Local_Min_Confidence,0) + "%");
 
          direction    = local.direction;
          confidence   = local.confidence;
@@ -1022,25 +1095,30 @@ void CheckEntry() {
       }
    }
    else {
-      return;
+      REJECT("API muet et Enable_Local_Mode=false");
    }
 
    //================================================================
    // TIMING MODE GATE
    //================================================================
-   if(timingMode == "BLACKOUT") return;
-   if(timingMode == "PRE_NEWS_SETUP"  && !Allow_PreNews_Trading) return;
-   if(timingMode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade)   return;
+   if(timingMode == "BLACKOUT")
+      REJECT("Timing BLACKOUT");
+   if(timingMode == "PRE_NEWS_SETUP"  && !Allow_PreNews_Trading)
+      REJECT("PRE_NEWS_SETUP non autorise");
+   if(timingMode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade)
+      REJECT("POST_NEWS_ENTRY non autorise");
 
    //================================================================
    // CONFIDENCE GATE (API uniquement)
    //================================================================
-   if(signalSource == "API" && confidence < Min_Confidence) return;
+   if(signalSource == "API" && confidence < Min_Confidence)
+      REJECT("API confidence " + DoubleToString(confidence,0) + "% < " + DoubleToString(Min_Confidence,0) + "%");
 
    //================================================================
    // DIRECTION GATE
    //================================================================
-   if(direction != "BUY" && direction != "SELL") return;
+   if(direction != "BUY" && direction != "SELL")
+      REJECT("Direction invalide: " + direction);
 
    //================================================================
    // CONFLICT DETECTOR (VPS macro vs ICT/LOCAL technical)
@@ -1064,8 +1142,7 @@ void CheckEntry() {
    double conflictFactor = 1.0;
    if(signalConflict) {
       if(!Allow_Counter_Signal_Trading) {
-         Print("[CONFLICT] Counter-signal trading disabled (flag=false) -> skip");
-         return;
+         REJECT("Allow_Counter=false | VPS=" + g_Signal.direction + " ICT=" + direction);
       }
       conflictFactor = 0.5;
       Print("[CONFLICT] VPS=", g_Signal.direction,
@@ -1090,19 +1167,15 @@ void CheckEntry() {
 
       FilterResult fr = g_filters.CheckAllFilters(direction, price, timingMode, effectiveConfidence);
       if(!fr.passed) {
-         static string lastReason = "";
-         if(fr.blockReason != lastReason) {
-            Print("[", signalSource, "] Filter blocked: ", fr.blockReason);
-            lastReason = fr.blockReason;
-         }
-         return;
+         REJECT("[" + signalSource + "] QualityFilter: " + fr.blockReason);
       }
    }
 
    //================================================================
    // SNIPER M15 ENTRY
    //================================================================
-   if(g_sniper == NULL) return;
+   if(g_sniper == NULL)
+      REJECT("Sniper M15 NULL");
 
    int scoreThreshold = Sniper_Min_Score;
    if(timingMode   == "POST_NEWS_ENTRY") scoreThreshold = 50;
@@ -1110,15 +1183,19 @@ void CheckEntry() {
 
    g_LastSniper = g_sniper.AnalyzeEntry(direction, confidence, timingMode);
 
-   if(g_LastSniper.score < scoreThreshold) return;
+   if(g_LastSniper.score < scoreThreshold)
+      REJECT("Score " + IntegerToString(g_LastSniper.score) + "<" + IntegerToString(scoreThreshold) + " (" + g_LastSniper.reason + ")");
    // OPTIM-1+2 (2026-04-04): Gates adaptes par source de signal
    bool sweepRequired = (signalSource != "LONDON_RANGE");
    // OPTIM-2: Mode Local haute confidence (>=65%) : sweep non requis
    if(signalSource == "LOCAL" && confidence >= 65.0) sweepRequired = false;
-   if(sweepRequired && !g_LastSniper.sweep.detected) return;
+   if(sweepRequired && !g_LastSniper.sweep.detected)
+      REJECT("Sweep ICT requis mais NON detecte");
    // OPTIM-1: London Range n'exige pas BOS ni pullback stricts
-   if(signalSource != "LONDON_RANGE" && !g_LastSniper.bos.detected) return;
-   if(signalSource != "LONDON_RANGE" && !g_LastSniper.pullback.inZone) return;
+   if(signalSource != "LONDON_RANGE" && !g_LastSniper.bos.detected)
+      REJECT("BOS requis mais NON detecte");
+   if(signalSource != "LONDON_RANGE" && !g_LastSniper.pullback.inZone)
+      REJECT("Pullback PD array NON valide");
 
    // Log
    Print("======================================================");
@@ -1151,8 +1228,7 @@ void CheckEntry() {
    if(dealEnabled) {
       dealSizeFactor = g_filters.GetH4SizeFactor();
       if(dealSizeFactor <= 0.0) {
-         Print("[DEAL-v2] sizeFactor=0 -> trade bloque par DEAL");
-         return;
+         REJECT("DEAL v2 sizeFactor=0 (H4 contre direction)");
       }
    }
 
@@ -1185,6 +1261,10 @@ void CheckEntry() {
    // FIX LOCAL-COUNT (2026-04-04): Incrementer seulement si trade reellement ouvert
    if((signalSource == "LOCAL" || signalSource == "LONDON_RANGE") && g_InPosition)
       g_LocalTradesToday++;
+
+   // Trade execute -> reset du dernier motif de rejet (changement d'etat)
+   lastRejectReason = "";
+   #undef REJECT
 }
 
 //+------------------------------------------------------------------+

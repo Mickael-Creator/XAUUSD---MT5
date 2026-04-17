@@ -1557,20 +1557,25 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    result.signalTime = TimeCurrent();
    result.activeSession = GetActiveSession();
    result.sessionBoost = GetSessionBoost(result.activeSession);
-   
+
+   // LOG C (2026-04-17) : pipeline ICT instrumentation, deduplication
+   static string lastSniperLog = "";
+
    // Safety checks
    if(!m_initialized) {
       result.reason = "Sniper not initialized";
       m_lastResult = result;
       return result;
    }
-   
+
    if(!CheckSpread()) {
       result.reason = "Spread too high";
+      string s = "[SNIPER] Spread check: FAIL - " + result.reason;
+      if(s != lastSniperLog) { Print(s); lastSniperLog = s; }
       m_lastResult = result;
       return result;
    }
-   
+
    // Refresh data
    RefreshM15Data();
    DetectSwingPoints();
@@ -1616,8 +1621,19 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
 
    if(m_requireSweep && !result.sweep.detected && !allowBOSDirect) {
       result.reason = "No liquidity sweep detected";
+      // LOG C - sweep absent
+      int lvlc = (m_liquidity != NULL) ? m_liquidity.GetLevelCount() : 0;
+      string s = "[SNIPER] Sweep: NONE sur " + IntegerToString(lvlc) +
+                 " niveaux | Fenetre: 96 bougies M15 (24h)";
+      if(s != lastSniperLog) { Print(s); lastSniperLog = s; }
       m_lastResult = result;
       return result;
+   }
+   // LOG C - sweep detecte
+   if(result.sweep.detected) {
+      string s = "[SNIPER] Sweep: " + result.sweep.sweepType +
+                 " @ " + DoubleToString(result.sweep.sweepPrice, 2);
+      if(s != lastSniperLog) { Print(s); lastSniperLog = s; }
    }
    
    if(result.sweep.detected && !result.sweep.reclaimed) {
@@ -1639,8 +1655,15 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    
    if(m_requireBOS && !result.bos.detected) {
       result.reason = "No BOS detected";
+      // LOG C - BOS absent
+      string s = "[SNIPER] BOS: NONE apres sweep " + result.sweep.sweepType;
+      if(s != lastSniperLog) { Print(s); lastSniperLog = s; }
       m_lastResult = result;
       return result;
+   }
+   if(result.bos.detected) {
+      string s = "[SNIPER] BOS: confirme " + result.bos.direction;
+      if(s != lastSniperLog) { Print(s); lastSniperLog = s; }
    }
    
    if(result.bos.detected && !result.bos.confirmed) {
@@ -1707,7 +1730,15 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    } else {
       result.reason = "Score too low (" + IntegerToString(result.score) + "/" + IntegerToString(m_minScore) + ")";
    }
-   
+
+   // LOG C - score final
+   {
+      string s = "[SNIPER] Score final: " + IntegerToString(result.score) +
+                 "/100 | Seuil: " + IntegerToString(m_minScore) +
+                 " | Valid: " + (result.score >= m_minScore ? "YES" : "NO");
+      if(s != lastSniperLog) { Print(s); lastSniperLog = s; }
+   }
+
    m_lastResult = result;
    return result;
 }
