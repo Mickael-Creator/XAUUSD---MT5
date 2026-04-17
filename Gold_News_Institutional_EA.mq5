@@ -1213,7 +1213,11 @@ void CheckEntry() {
       static datetime lastSniperBarM5   = 0;
       static string   lastSniperSetup   = "";
       datetime curM5Bar = iTime(_Symbol, PERIOD_M5, 0);
-      string   curSetup = direction + "_" + signalSource;
+      // Fix : signalSource retiré du throttle
+      // Raison : flip API<->LOCAL bypass le throttle
+      // -> relance analyse inutilement a chaque flip
+      // Seule la direction BUY/SELL compte
+      string   curSetup = direction;
 
       bool sameBar    = (curM5Bar == lastSniperBarM5);
       bool sameSetup  = (curSetup == lastSniperSetup);
