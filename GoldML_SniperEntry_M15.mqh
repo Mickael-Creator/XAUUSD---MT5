@@ -1039,14 +1039,6 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, LiquiditySweep &sweep
 
    if(!bos.detected) return zone;
 
-   // C3 (2026-04-17) : log d'entree pullback (deduplication anti-spam)
-   {
-      static string lastPbStartLog = "";
-      string sp = "[PULLBACK] Recherche FVG/OB sur M5... | Bougies M5 disponibles: " +
-                  IntegerToString(ArraySize(m_close_M5));
-      if(sp != lastPbStartLog) { Print(sp); lastPbStartLog = sp; }
-   }
-
    // CORRECTION 14: VÃ©rifier ICT Detector existe
    if(m_ictDetector == NULL) {
       Print("âš ï¸ AnalyzePullback: ICT Detector NULL");
@@ -1055,6 +1047,15 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, LiquiditySweep &sweep
 
    // Use M5 for mitigation + timing
    RefreshM5Data();
+
+   // C3 (2026-04-17) : log d'entree pullback (deduplication anti-spam)
+   // Deplace apres RefreshM5Data pour refleter la taille reelle de m_close_M5.
+   {
+      static string lastPbStartLog = "";
+      string sp = "[PULLBACK] Recherche FVG/OB sur M5... | Bougies M5 disponibles: " +
+                  IntegerToString(ArraySize(m_close_M5));
+      if(sp != lastPbStartLog) { Print(sp); lastPbStartLog = sp; }
+   }
    
    // CORRECTION 15: Valider taille array M5
    if(ArraySize(m_close_M5) < 20) {

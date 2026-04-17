@@ -1230,7 +1230,7 @@ void CheckEntry() {
 
       if(sameBar && sameSetup) {
          g_sweepSkipCount++;
-         if(g_sweepSkipCount % 100 == 0) {
+         if(g_sweepSkipCount % 10 == 0) {
             Print("[SWEEP] Skip analyse: meme bougie M5 + meme setup ",
                   curSetup, " (", (int)(TimeGMT() - lastSniperRunTime),
                   "s ago, ", g_sweepSkipCount, " ticks)");
