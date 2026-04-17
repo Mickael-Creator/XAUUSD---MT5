@@ -1198,29 +1198,49 @@ void CheckEntry() {
    if(timingMode   == "POST_NEWS_ENTRY") scoreThreshold = 50;
    if(signalSource == "LOCAL")           scoreThreshold = 60;
 
-   g_LastSniper = g_sniper.AnalyzeEntry(direction, confidence, timingMode);
+   //================================================================
+   // C1 FIX (2026-04-17) : THROTTLE AVANT AnalyzeEntry
+   // Probleme : OnTick tourne 100x/sec -> AnalyzeEntry rejouait l'analyse
+   // ICT complete a chaque tick (sweep+BOS+pullback+score) = spam logs.
+   // Solution : analyser au plus une fois par bougie M5 (5 min) ET
+   // au moins 30s entre 2 analyses pour le meme setup (direction+source).
+   //================================================================
+   {
+      static datetime lastSniperRunTime = 0;
+      static datetime lastSniperBarM5   = 0;
+      static string   lastSniperSetup   = "";
+      datetime curM5Bar = iTime(_Symbol, PERIOD_M5, 0);
+      string   curSetup = direction + "_" + signalSource;
 
-   // C2 (2026-04-17) : anti-repetition logs si meme sweep persiste
-   if(g_LastSniper.sweep.detected) {
-      string sweepKey = g_LastSniper.sweep.sweepType +
-                        DoubleToString(g_LastSniper.sweep.sweepPrice, 2);
+      bool sameBar    = (curM5Bar == lastSniperBarM5);
+      bool sameSetup  = (curSetup == lastSniperSetup);
+      bool tooRecent  = (TimeGMT() - lastSniperRunTime < 30);
 
-      // Meme sweep dans la derniere minute -> skip rejet log spam
-      if(sweepKey == g_lastSweepDetected &&
-         TimeGMT() - g_lastSweepTime < 60) {
+      if(sameBar && sameSetup && tooRecent) {
          g_sweepSkipCount++;
-         if(g_sweepSkipCount % 50 == 0) {
-            Print("[SWEEP] Meme setup en attente depuis ",
-                  (int)(TimeGMT() - g_lastSweepTime), "s (",
-                  g_sweepSkipCount, " ticks)");
+         if(g_sweepSkipCount % 100 == 0) {
+            Print("[SWEEP] Skip analyse: meme bougie M5 + meme setup ",
+                  curSetup, " (", (int)(TimeGMT() - lastSniperRunTime),
+                  "s ago, ", g_sweepSkipCount, " ticks)");
          }
-         return;  // skip rejet detaille (BOS/pullback/score) - meme etat
+         return;  // Skip AnalyzeEntry et tout downstream
       }
 
-      // Nouveau sweep -> reset compteur
-      g_lastSweepDetected = sweepKey;
+      // Nouveau setup OU nouvelle bougie M5 OU >= 30s -> on analyse
+      lastSniperRunTime = TimeGMT();
+      lastSniperBarM5   = curM5Bar;
+      lastSniperSetup   = curSetup;
+      g_sweepSkipCount  = 0;
+   }
+
+   g_LastSniper = g_sniper.AnalyzeEntry(direction, confidence, timingMode);
+
+   // Memoriser sweep detecte pour info (utilise par les 3 vars statiques deja
+   // declarees au top de CheckEntry, gardees pour traçabilite minimale)
+   if(g_LastSniper.sweep.detected) {
+      g_lastSweepDetected = g_LastSniper.sweep.sweepType +
+                            DoubleToString(g_LastSniper.sweep.sweepPrice, 2);
       g_lastSweepTime     = TimeGMT();
-      g_sweepSkipCount    = 0;
    }
 
    if(g_LastSniper.score < scoreThreshold)

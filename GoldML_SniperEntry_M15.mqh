@@ -209,7 +209,8 @@ private:
    LiquiditySweep DetectLiquiditySweep_ICT(string direction);
    // FIX ICT-B3: parametre sweepBar pour garantir BOS apres sweep
    BreakOfStructure DetectBOS(string direction, int sweepBar = -1);
-   PullbackZone AnalyzePullback(string direction, BreakOfStructure &bos, string timingMode = "CLEAR");
+   // FIX C2 (2026-04-17) : sweep ajoute pour OTE fallback (50-79% retracement)
+   PullbackZone AnalyzePullback(string direction, LiquiditySweep &sweep, BreakOfStructure &bos, string timingMode = "CLEAR");
    M5Confirmation CheckM5Confirmation(string direction);
    ENUM_M5_PATTERN DetectM5Pattern(string direction);
    double   CalculateSL(string direction, LiquiditySweep &sweep);
@@ -1022,7 +1023,7 @@ BreakOfStructure CSniperM15::DetectBOS(string direction, int sweepBar) {
 //+------------------------------------------------------------------+
 //| Analyze Pullback Zone (Institutional ICT Style)                  |
 //+------------------------------------------------------------------+
-PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos, string timingMode) {
+PullbackZone CSniperM15::AnalyzePullback(string direction, LiquiditySweep &sweep, BreakOfStructure &bos, string timingMode) {
    PullbackZone zone;
    zone.inZone = false;
    zone.mitigated = false;
@@ -1116,7 +1117,55 @@ PullbackZone CSniperM15::AnalyzePullback(string direction, BreakOfStructure &bos
    }
 
    if(!pd.found) {
-      return zone;
+      // C2 OTE FALLBACK (2026-04-17) : si pas de FVG/OB, accepter
+      // un retracement 50-79% du mouvement Sweep -> BOS comme zone d'entree.
+      // Optimal Trade Entry (OTE) ICT : zone golden pocket institutionnelle.
+      if(sweep.detected && sweep.sweepPrice > 0.0 && bos.bosPrice > 0.0) {
+         double swingLow = 0.0, swingHigh = 0.0, ote50 = 0.0, ote79 = 0.0;
+         bool inOTE = false;
+
+         if(direction == "BUY") {
+            swingLow  = sweep.sweepPrice;
+            swingHigh = bos.bosPrice;
+            if(swingHigh > swingLow) {
+               ote50 = swingHigh - (swingHigh - swingLow) * 0.50;
+               ote79 = swingHigh - (swingHigh - swingLow) * 0.79;
+               inOTE = (price <= ote50 && price >= ote79);
+               if(inOTE) {
+                  zone.zoneHigh = ote50;
+                  zone.zoneLow  = ote79;
+               }
+            }
+         } else {
+            swingHigh = sweep.sweepPrice;
+            swingLow  = bos.bosPrice;
+            if(swingHigh > swingLow) {
+               ote50 = swingLow + (swingHigh - swingLow) * 0.50;
+               ote79 = swingLow + (swingHigh - swingLow) * 0.79;
+               inOTE = (price >= ote50 && price <= ote79);
+               if(inOTE) {
+                  zone.zoneHigh = ote79;
+                  zone.zoneLow  = ote50;
+               }
+            }
+         }
+
+         if(inOTE) {
+            zone.optimalEntry = (zone.zoneHigh + zone.zoneLow) / 2.0;
+            zone.pdType       = "OTE";
+            zone.pdStrength   = 70.0;
+            zone.fibLevel     = 0.65;
+            zone.mitigated    = true;  // Bypass mitigation gate
+            zone.chochM5      = true;  // Bypass CHoCH gate (OTE = setup ICT autonome)
+            zone.inZone       = true;
+            Print("[PULLBACK-OTE] ", direction, " zone ",
+                  DoubleToString(zone.zoneLow, 2), "-",
+                  DoubleToString(zone.zoneHigh, 2),
+                  " | Price ", DoubleToString(price, 2));
+            return zone;
+         }
+      }
+      return zone;  // pas de FVG/OB et pas d'OTE valide
    }
 
    zone.zoneHigh = pd.zoneHigh;
@@ -1731,7 +1780,7 @@ SniperResultM15 CSniperM15::AnalyzeEntry(string direction, double confidence, st
    }
    
    // Step 4: Analyze Pullback
-   result.pullback = AnalyzePullback(direction, result.bos, timingMode);
+   result.pullback = AnalyzePullback(direction, result.sweep, result.bos, timingMode);
    
    if(!result.pullback.mitigated) {
       result.reason = "No mitigation on M5 PD array";
