@@ -313,7 +313,11 @@ int OnInit() {
    
    if(!g_filters.Initialize(
          true, 30, 30,          // Cooldown (after loss=30min, after win=0)
-         true, 0.5, 12,        // Range
+         // Range Filter desactive (2026-04-17)
+         // Redondant avec pipeline ICT
+         // Sweep+BOS+CHoCH = vrais filtres de range
+         // Anciens parametres conserves pour reference : minRangeATR=0.5, lookback=12
+         false, 0.5, 12,       // Range (DESACTIVE)
          true, 4, 10, 5,       // Consecutive: losses=4, wins=10, sameDir=5
          true, 30.0, 5,        // Same level
          true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0,
