@@ -1339,6 +1339,12 @@ void ExecuteTrade(string direction) {
       return;
    }
 
+   // FIX 2026-04-17 (C1) : pipSize explicite pour clarte et coherence
+   // 2-digit Gold : point=0.01 -> pipSize=0.10 (1 pip = $0.10)
+   // 5-digit forex : point=0.00001 -> pipSize=0.0001
+   // Utilise partout ci-dessous au lieu de "point * 10" errant.
+   double pipSize = point * 10.0;
+
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
@@ -1386,7 +1392,22 @@ void ExecuteTrade(string direction) {
       }
 
       double riskAmount = equity * (effectiveRisk / 100.0) * g_Signal.size_factor;
-      lots = riskAmount / (slPips * (tickValue / tickSize));
+
+      // FIX 2026-04-17 (C2) : formule lot correcte avec pipSize
+      // Ancienne formule : lots = risk / (slPips * tickValue/tickSize)
+      //   -> manquait le facteur pipSize -> lots 10x trop petits pour Gold
+      // Nouvelle : pipValue = valeur monetaire d'UN pip entier pour 1 lot
+      //   pipValue = tickValue * pipSize / tickSize
+      //   Gold 2-digit : $1 * 0.10 / 0.01 = $10 par pip par lot
+      //   lots = risk / (slPips * pipValue)
+      double pipValue = tickValue * (pipSize / tickSize);
+      lots = riskAmount / (slPips * pipValue);
+
+      Print("[LOT-CALC] pipSize=", DoubleToString(pipSize, 4),
+            " pipValue=", DoubleToString(pipValue, 4),
+            " riskAmount=", DoubleToString(riskAmount, 2),
+            " slPips=", DoubleToString(slPips, 1),
+            " rawLots=", DoubleToString(lots, 4));
 
       // AUDIT-C4: Log the calculation for audit trail
       Print("[AUDIT-C4] Lot calc: equity=", DoubleToString(equity, 2),
@@ -1394,6 +1415,19 @@ void ExecuteTrade(string direction) {
             " risk_amount=", DoubleToString(riskAmount, 2),
             " SL_pips=", DoubleToString(slPips, 1),
             " raw_lots=", DoubleToString(lots, 4));
+
+      // FIX 2026-04-17 (C3) : garantie minLot + log risque reel
+      // Si rawLots < minLot, on ne bloque pas le trade mais on alerte
+      // sur le risque effectif qui depassera Risk_Percent
+      if(lots < minLot) {
+         double realRisk    = minLot * slPips * pipValue;
+         double realRiskPct = (equity > 0.0) ? (realRisk / equity * 100.0) : 0.0;
+         Print("[LOT] rawLots(", DoubleToString(lots, 4),
+               ") < minLot(", DoubleToString(minLot, 2),
+               ") -> utilise minLot | risque reel: ",
+               DoubleToString(realRiskPct, 2), "%");
+         lots = minLot;
+      }
    } else {
       // Fallback to Base_Lot_Size if equity/tick data unavailable
       Print("[AUDIT-C4] WARNING: falling back to Base_Lot_Size (equity or tick data unavailable)");
@@ -1480,15 +1514,16 @@ void ExecuteTrade(string direction) {
    double tpPips = slPips * tpRR;
 
    // Calculate prices
+   // FIX 2026-04-17 (C1) : utilise pipSize explicite (same math, code clair)
    double sl, tp;
    if(direction == "BUY") {
       entry = ask;
-      sl = entry - slPips * point * 10;
-      tp = entry + tpPips * point * 10;
+      sl = entry - slPips * pipSize;
+      tp = entry + tpPips * pipSize;
    } else {
       entry = bid;
-      sl = entry + slPips * point * 10;
-      tp = entry - tpPips * point * 10;
+      sl = entry + slPips * pipSize;
+      tp = entry - tpPips * pipSize;
    }
 
    // CORRECTION 22: Normalize SL/TP
