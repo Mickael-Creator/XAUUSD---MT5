@@ -202,9 +202,24 @@ void CLiquidityLevels::CalculateAsianRange() {
    if(pipSize <= 0.0) pipSize = 0.01;
    double rangeSize = (asianHigh - asianLow) / pipSize;
 
-   if(rangeSize < 10.0 || rangeSize > 80.0) {
+   // FIX 2026-04-17: cap dynamique = 2 x ATR D1 (defaut 150 pips si ATR indispo)
+   // Ancien filtre fixe 10-80 pips rejettait toutes les sessions Gold volatiles
+   double maxRange = 150.0;
+   int hATR_D1 = iATR(m_symbol, PERIOD_D1, 14);
+   if(hATR_D1 != INVALID_HANDLE) {
+      double atrD1[];
+      ArraySetAsSeries(atrD1, true);
+      if(CopyBuffer(hATR_D1, 0, 0, 1, atrD1) >= 1 && atrD1[0] > 0.0) {
+         double atrPips = atrD1[0] / pipSize;
+         maxRange = atrPips * 2.0;
+      }
+      IndicatorRelease(hATR_D1);
+   }
+
+   if(rangeSize < 10.0 || rangeSize > maxRange) {
       Print("[LIQ] Asian range hors bornes (", DoubleToString(rangeSize, 0),
-            " pips) — niveaux non ajoutes");
+            " pips) — cap=", DoubleToString(maxRange, 0),
+            " pips (2 x ATR D1) — niveaux non ajoutes");
       return;
    }
 
@@ -294,7 +309,8 @@ void CLiquidityLevels::DetectEqualHighsLows() {
       return;
    }
    double atrVal    = atr[0];
-   double tolerance = atrVal * 0.03;
+   // FIX 2026-04-17: tolerance 0.03 -> 0.05 x ATR (plus permissif equal wicks)
+   double tolerance = atrVal * 0.05;
    IndicatorRelease(hATR);
 
    if(atrVal <= 0.0 || tolerance <= 0.0) return;
@@ -307,7 +323,8 @@ void CLiquidityLevels::DetectEqualHighsLows() {
    if(CopyLow(m_symbol,  PERIOD_M15, 1, 100, lows)  < 100) return;
 
    const int MAX_EQL      = 3;     // max 3 Equal Highs + 3 Equal Lows
-   const int MIN_BAR_GAP  = 10;    // >= 10 bougies M15 (2h30) entre 2 EQL
+   // FIX 2026-04-17: gap 10 -> 20 bougies M15 (5h) entre 2 EQL meme cote
+   const int MIN_BAR_GAP  = 20;
    int    foundBarsH[];
    int    foundBarsL[];
    int    nHigh = 0;
@@ -325,8 +342,8 @@ void CLiquidityLevels::DetectEqualHighsLows() {
             for(int k = i + 1; k < j; k++)
                if(lows[k] < minBetween) minBetween = lows[k];
 
-            // Creux significatif entre les deux (1.0 x ATR)
-            if(highs[i] - minBetween > atrVal * 1.0) {
+            // FIX 2026-04-17: creux significatif 1.0 -> 1.5 x ATR (filtre plus exigeant)
+            if(highs[i] - minBetween > atrVal * 1.5) {
                // Espacement temporel minimum vs Equal Highs deja trouves
                bool tooClose = false;
                for(int n = 0; n < nHigh; n++)
@@ -363,7 +380,8 @@ void CLiquidityLevels::DetectEqualHighsLows() {
             for(int k = i + 1; k < j; k++)
                if(highs[k] > maxBetween) maxBetween = highs[k];
 
-            if(maxBetween - lows[i] > atrVal * 1.0) {
+            // FIX 2026-04-17: sommet significatif 1.0 -> 1.5 x ATR
+            if(maxBetween - lows[i] > atrVal * 1.5) {
                bool tooClose = false;
                for(int n = 0; n < nLow; n++)
                   if(MathAbs(foundBarsL[n] - i) < MIN_BAR_GAP) {
@@ -403,9 +421,13 @@ void CLiquidityLevels::RefreshAllLevels() {
    CalculatePWH_PWL();
    CalculateAsianRange();
    CalculateLondonRange();
-   // DetectEqualHighsLows();
-   // TEMPORAIREMENT DESACTIVE — trop de niveaux
-   // A reactiver apres correction complete
+   // FIX 2026-04-17: REACTIVE avec parametres stricts
+   //   - tolerance 0.05 x ATR (vs 0.03)
+   //   - gap minimum 20 bougies (vs 10)
+   //   - creux/sommet 1.5 x ATR (vs 1.0)
+   //   - max 3 EQL_H + 3 EQL_L
+   // Cap absolu m_count <= 10 niveaux toujours actif (AddLevel)
+   DetectEqualHighsLows();
 
    Print("[LIQ] Total niveaux actifs: ", m_count);
 }

@@ -358,8 +358,10 @@ bool CSniperM15::Initialize(int swingLookback, int minSwingBars,
 //| Refresh M15 Price Data                                           |
 //+------------------------------------------------------------------+
 void CSniperM15::RefreshM15Data() {
-   int bars = m_swingLookback + 30;
-   
+   // FIX 2026-04-17: garantir >= 130 bougies pour DetectLiquiditySweep_ICT
+   // (scan 96 + buffer reclaim + securite). Decouple du swingLookback.
+   int bars = MathMax(m_swingLookback + 30, 130);
+
    // CORRECTION 4: VÃ©rifier les retours de CopyXXX
    int copied = CopyHigh(m_symbol, PERIOD_M15, 0, bars, m_high_M15);
    if(copied < bars) {
@@ -600,7 +602,8 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
          if(!isBullishLevel) continue;
 
          // Chercher bougie qui a penetre sous le niveau (bougies fermees, j>=1)
-         for(int j = 1; j < 25 && j < arraySize; j++) {
+         // FIX 2026-04-17: fenetre 25 -> 96 (24h) pour catcher sweeps PDL/PDH/PWH/PWL
+         for(int j = 1; j < 96 && j < arraySize; j++) {
             if(m_low_M15[j] < lvl.price - point * 0.5) {
                // Wick penetre le niveau
 
@@ -683,7 +686,8 @@ LiquiditySweep CSniperM15::DetectLiquiditySweep_ICT(string direction) {
                                 lvl.type == "EQL_H");
          if(!isBearishLevel) continue;
 
-         for(int j = 1; j < 25 && j < arraySize; j++) {
+         // FIX 2026-04-17: fenetre 25 -> 96 (24h) pour catcher sweeps PDH/PWH
+         for(int j = 1; j < 96 && j < arraySize; j++) {
             if(m_high_M15[j] > lvl.price + point * 0.5) {
 
                bool reclaimed  = false;

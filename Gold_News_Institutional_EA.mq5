@@ -78,7 +78,11 @@ input bool   Sniper_Require_Sweep = true;
 input bool   Sniper_Require_BOS = true;
 input double Sniper_Min_RR = 2.0;
 input int    Sniper_Min_Score = 55;        // Abaissé après recalibrage scoring
-input double Sniper_Max_Spread = 4.5;      // Ã‰largi pour volatilitÃ© news
+// FIX 2026-04-17: defaut 4.5 -> 7.0 pips (FTMO XAUUSD spread reel 50-65 points = 5-6.5 pips)
+// Spread FTMO XAUUSD observe : 50-65 points
+// Ne pas descendre sous 6.5 (risque de blocage)
+// Ne pas monter au-dessus de 10 (spread anormal)
+input double Sniper_Max_Spread = 7.0;      // FTMO XAUUSD : seuil 7 pips = marge securite
 input double Sniper_SL_Buffer_Pips = 3.0;  // M15: Buffer plus large
 input double Sniper_SL_Min_Pips = 25.0;    // M15: SL minimum (evite stop hunts news)
 input double Sniper_SL_Max_Pips = 45.0;    // M15: SL max (partial TP toujours viable)
@@ -128,10 +132,14 @@ input double Phase_Test_Force_Lot = 0.01;   // 0.0 = desactive (utilise Risk_Per
 //+------------------------------------------------------------------+
 input group "â•â•â• SESSION â•â•â•"
 input bool   Enable_Session_Filter = true;
-input string Session_Start = "07:00";  // FIX m-10.1 (2026-04-03): Volume XAUUSD significatif après 07:00 GMT
-// IMPROVE 7 (2026-04-03): Session fermee a 18:00 GMT
-// La fin de session NY (18:00-20:00 GMT) est trop bruyante et peu fiable
-input string Session_End = "18:00";
+// FIX 2026-04-17: defauts 07:00-18:00 -> 00:00-21:00 (session etendue)
+// Capture les Judas Swings nocturnes et la session asiatique :
+//   - Judas Swing Asian (00:00-07:00 GMT)
+//   - London Open       (07:00-16:00 GMT)
+//   - NY Session        (13:00-21:00 GMT)
+// Modifier si besoin via inputs MT5
+input string Session_Start = "00:00";
+input string Session_End   = "21:00";
 
 
 //+------------------------------------------------------------------+
