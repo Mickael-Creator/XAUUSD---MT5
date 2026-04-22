@@ -164,6 +164,17 @@ input double Local_Size_Factor        = 0.7;    // Taille position reduite en mo
 input int    Local_Max_Daily_Trades   = 3;      // Max trades locaux par jour
 
 //+------------------------------------------------------------------+
+//| H4 STRUCTURE VETO (P2 — 2026-04-22)                              |
+//+------------------------------------------------------------------+
+// Veto structurel independant du scoring DEAL-v2. Bloque :
+//   - BUY  si H4 == BEARISH confirme (Lower High + Lower Low sur derniers swings)
+//   - SELL si H4 == BULLISH confirme (Higher High + Higher Low)
+// Ne bloque PAS les cas CONTRA-LIGHT (1 seul critere casse) ni RANGING.
+// Rollback : passer a false pour retrouver le comportement pre-P2 (DEAL-v2 seul).
+input group "=== H4 STRUCTURE VETO ==="
+input bool   Enable_H4_Hard_Veto = true;
+
+//+------------------------------------------------------------------+
 //| ICT LIQUIDITY (PHASE 1 APPROCHE A)                                |
 //+------------------------------------------------------------------+
 input group "=== ICT LIQUIDITY (PHASE 1) ==="
@@ -331,7 +342,10 @@ int OnInit() {
          true, 4, 10, 5,       // Consecutive: losses=4, wins=10, sameDir=5
          true, 30.0, 5,        // Same level
          true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0,
-         Enable_Session_Filter, Session_Start, Session_End, false)) {
+         Enable_Session_Filter, Session_Start, Session_End, false,
+         true,                 // enableTrendFilter (defaut explicite)
+         Enable_H4_Hard_Veto   // P2 (2026-04-22): veto structurel H4
+         )) {
       Print("âŒ Quality Filters initialization failed");
       delete g_filters;
       g_filters = NULL;
@@ -400,7 +414,8 @@ int OnInit() {
          " | Test Lot: ", DoubleToString(Phase_Test_Force_Lot, 2));
    Print("  ICT Liquidity: ", Enable_ICT_Liquidity ? "ON" : "OFF",
          " | DEAL v2: ON | Bidirectionnel: ",
-         Allow_Counter_Signal_Trading ? "ON" : "OFF");
+         Allow_Counter_Signal_Trading ? "ON" : "OFF",
+         " | H4 Hard Veto (P2): ", Enable_H4_Hard_Veto ? "ON" : "OFF");
    Print("  Min Score: ", Sniper_Min_Score,
          " | Max SL: ", DoubleToString(Sniper_SL_Max_Pips, 0), " pips",
          " | Reclaim: 8 bougies | Scan sweep: 96 bougies (24h)");

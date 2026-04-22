@@ -99,6 +99,11 @@ private:
    int      m_lastH4Score;     // Dernier score H4 calculé
    double   m_h4SizeFactor;    // DEAL v2: size factor H4 (0.0=blocked, 0.35-1.0)
 
+   // P2 Veto H4 structurel (2026-04-22) — bloque BUY vs H4 BEARISH (LH+LL) et
+   // SELL vs H4 BULLISH (HH+HL) independamment du score DEAL-v2.
+   bool     m_enableH4HardVeto;
+   bool     m_lastH4IsHardCounter;  // true si derniere eval H4 = contre-structure forte
+
    // Indicator handles
    int      m_hATR;
    
@@ -159,7 +164,8 @@ public:
                    string sessionStart = "07:00",
                    string sessionEnd = "18:00",
                    bool allowAsian = false,
-                   bool enableTrendFilter = true);
+                   bool enableTrendFilter = true,
+                   bool enableH4HardVeto = true);
    
    // Main filter check
    // FIX C-6.1 (2026-04-03): timingMode ajouté pour désactiver EMA en POST_NEWS
@@ -193,6 +199,10 @@ public:
    int GetLastH4Score() { return m_lastH4Score; }
    bool IsEnableDEAL()  { return m_enableDEAL; }
    double GetH4SizeFactor() { return m_h4SizeFactor; }
+
+   // P2 Veto H4 structurel (2026-04-22)
+   bool IsLastH4HardCounter() { return m_lastH4IsHardCounter; }
+   bool IsH4HardVetoEnabled() { return m_enableH4HardVeto; }
 
    // Diagnostic helper (Log A) : expose le test de session sans le filtre on/off
    bool IsInSession() { return InTradingSession(); }
@@ -232,6 +242,8 @@ CQualityFilters::CQualityFilters(string symbol, int magic) {
    m_enableDEAL = true;   // Option E activé directement
    m_lastH4Score = 0;
    m_h4SizeFactor = 1.0;  // DEAL v2: défaut taille normale
+   m_enableH4HardVeto = true;       // P2 (2026-04-22): veto structurel actif par defaut
+   m_lastH4IsHardCounter = false;
 
    ArrayResize(m_recentTrades, 0);
 }
@@ -256,7 +268,8 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
                                   double maxDailyLoss, double maxDailyDD,
                                   bool enableSession, string sessionStart, string sessionEnd,
                                   bool allowAsian,
-                                  bool enableTrendFilter) {
+                                  bool enableTrendFilter,
+                                  bool enableH4HardVeto) {
    
    m_enableCooldown = enableCooldown;
    m_cooldownMinutes = cooldownMinutes;
@@ -287,6 +300,9 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
 
    m_enableTrendFilter = enableTrendFilter;
 
+   m_enableH4HardVeto = enableH4HardVeto;
+   m_lastH4IsHardCounter = false;
+
    m_hATR = iATR(m_symbol, PERIOD_M15, 14);
 
    if(m_hATR == INVALID_HANDLE) {
@@ -311,6 +327,8 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
          " (max ", m_maxDailyTrades, " trades)");
    Print("  Session: ", m_enableSessionFilter ? "ON" : "OFF",
          " (", m_sessionStart, " - ", m_sessionEnd, ")");
+   Print("  H4 Hard Veto (P2): ", m_enableH4HardVeto ? "ON" : "OFF",
+         " (bloque BUY vs BEARISH_LH_LL / SELL vs BULLISH_HH_HL)");
    Print("");
    
    return true;
@@ -577,6 +595,9 @@ bool CQualityFilters::CheckDrawdown() {
 //| Remplace le blocage binaire par un scoring integre au Sniper    |
 //+------------------------------------------------------------------+
 int CQualityFilters::GetH4ScoreContribution(string direction, double apiConfidence) {
+   // P2 (2026-04-22): reset du flag a chaque evaluation pour eviter etat herite
+   m_lastH4IsHardCounter = false;
+
    double h4High[], h4Low[];
    ArraySetAsSeries(h4High, true);
    ArraySetAsSeries(h4Low, true);
@@ -631,6 +652,7 @@ int CQualityFilters::GetH4ScoreContribution(string direction, double apiConfiden
       }
       else if(h4Bearish) {
          // CONTRE FORT: LH+LL confirmes
+         m_lastH4IsHardCounter = true;  // P2: flag pour veto structurel dans CheckTrendH4
          if(apiConfidence >= 70.0)      { score = -10; m_h4SizeFactor = 0.50; Print("[DEAL-v2] H4 BEARISH (LH+LL) + API>=70% -> -10 | size 50%"); }
          else if(apiConfidence >= 60.0) { score = -20; m_h4SizeFactor = 0.35; Print("[DEAL-v2] H4 BEARISH (LH+LL) + API 60-70% -> -20 | size 35%"); }
          else                           { score = -25; m_h4SizeFactor = 0.0;  Print("[DEAL-v2] H4 BEARISH (LH+LL) + API<60% -> -25 | BLOCKED"); }
@@ -652,6 +674,7 @@ int CQualityFilters::GetH4ScoreContribution(string direction, double apiConfiden
          else                           { score = -25; m_h4SizeFactor = 0.0;  Print("[DEAL-v2] H4 CONTRA-LIGHT + API<60% -> -25 | BLOCKED"); }
       }
       else if(h4Bullish) {
+         m_lastH4IsHardCounter = true;  // P2 symetrie: flag pour veto SELL vs H4 BULLISH
          if(apiConfidence >= 70.0)      { score = -10; m_h4SizeFactor = 0.50; Print("[DEAL-v2] H4 BULLISH (HH+HL) + API>=70% -> -10 | size 50%"); }
          else if(apiConfidence >= 60.0) { score = -20; m_h4SizeFactor = 0.35; Print("[DEAL-v2] H4 BULLISH (HH+HL) + API 60-70% -> -20 | size 35%"); }
          else                           { score = -25; m_h4SizeFactor = 0.0;  Print("[DEAL-v2] H4 BULLISH (HH+HL) + API<60% -> -25 | BLOCKED"); }
@@ -711,6 +734,17 @@ bool CQualityFilters::CheckTrendH4(string direction, double apiConfidence) {
    // Option E activée : calculer le score, jamais bloquer sauf cas extrême
    int h4Score = GetH4ScoreContribution(direction, apiConfidence);
 
+   // P2 Veto H4 structurel (2026-04-22) — blocage AVANT seuil de score.
+   // Cible : BUY vs H4 BEARISH (LH+LL) ou SELL vs H4 BULLISH (HH+HL).
+   // H4 CONTRA-LIGHT (1 critere seul) n'est pas impacte.
+   if(m_enableH4HardVeto && m_lastH4IsHardCounter) {
+      string counterStruct = (direction == "BUY") ? "BEARISH LH+LL" : "BULLISH HH+HL";
+      Print("[H4-VETO] ", direction, " bloque: H4 contre-structure forte (",
+            counterStruct, ") | score calcule=", h4Score,
+            " ignore (veto structurel independant du score DEAL)");
+      return false;
+   }
+
    // Seul cas de blocage : score -25 = H4 contre + API < 60%
    if(h4Score <= -25) {
       Print("[DEAL-v2] H4 score -25 -> blocage (H4 contre-tendance + API<60%)");
@@ -748,6 +782,7 @@ FilterResult CQualityFilters::CheckAllFilters(string direction, double entryPric
       // un m_h4SizeFactor stale (potentiellement 0.0) herite d'un appel precedent.
       m_h4SizeFactor = 1.0;
       m_lastH4Score  = 0;
+      m_lastH4IsHardCounter = false;  // P2: aussi reset le flag veto en bypass POST_NEWS
       Print("[POST_NEWS] H4 bypassed -> sizeFactor=1.0");
    } else {
       result.trendOK = CheckTrendH4(direction, apiConfidence);
