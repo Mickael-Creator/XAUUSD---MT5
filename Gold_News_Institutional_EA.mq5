@@ -175,6 +175,19 @@ input group "=== H4 STRUCTURE VETO ==="
 input bool   Enable_H4_Hard_Veto = true;
 
 //+------------------------------------------------------------------+
+//| DEAL-v2 REJECT THRESHOLD (P3 — 2026-04-22)                       |
+//+------------------------------------------------------------------+
+// Seuil de rejet sur le score DEAL-v2 calcule par GetH4ScoreContribution.
+// Score <= threshold -> REJECT (vs avant : seul -25 bloquait).
+// Defaut -20 : bloque aussi les cas "H4 contre + API 60-70%" (ex: H4 BEARISH + API 65%).
+// Scores -5, -10, -15 gardent leur comportement de modulation via sizeFactor.
+// Rollback safety : mettre a -99 -> aucun score atteint, tous passent.
+// Interaction avec P2 : P2 s execute AVANT, donc si veto structurel declenche,
+// ce seuil n est pas evalue (comportement attendu).
+input group "=== DEAL-v2 REJECT THRESHOLD ==="
+input int    DEAL_Reject_Threshold = -20;
+
+//+------------------------------------------------------------------+
 //| ICT LIQUIDITY (PHASE 1 APPROCHE A)                                |
 //+------------------------------------------------------------------+
 input group "=== ICT LIQUIDITY (PHASE 1) ==="
@@ -343,8 +356,9 @@ int OnInit() {
          true, 30.0, 5,        // Same level
          true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0,
          Enable_Session_Filter, Session_Start, Session_End, false,
-         true,                 // enableTrendFilter (defaut explicite)
-         Enable_H4_Hard_Veto   // P2 (2026-04-22): veto structurel H4
+         true,                  // enableTrendFilter (defaut explicite)
+         Enable_H4_Hard_Veto,   // P2 (2026-04-22): veto structurel H4
+         DEAL_Reject_Threshold  // P3 (2026-04-22): seuil de rejet DEAL-v2
          )) {
       Print("âŒ Quality Filters initialization failed");
       delete g_filters;
@@ -415,7 +429,8 @@ int OnInit() {
    Print("  ICT Liquidity: ", Enable_ICT_Liquidity ? "ON" : "OFF",
          " | DEAL v2: ON | Bidirectionnel: ",
          Allow_Counter_Signal_Trading ? "ON" : "OFF",
-         " | H4 Hard Veto (P2): ", Enable_H4_Hard_Veto ? "ON" : "OFF");
+         " | H4 Hard Veto (P2): ", Enable_H4_Hard_Veto ? "ON" : "OFF",
+         " | DEAL Reject (P3): ", DEAL_Reject_Threshold);
    Print("  Min Score: ", Sniper_Min_Score,
          " | Max SL: ", DoubleToString(Sniper_SL_Max_Pips, 0), " pips",
          " | Reclaim: 8 bougies | Scan sweep: 96 bougies (24h)");

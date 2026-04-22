@@ -104,6 +104,11 @@ private:
    bool     m_enableH4HardVeto;
    bool     m_lastH4IsHardCounter;  // true si derniere eval H4 = contre-structure forte
 
+   // P3 DEAL-v2 reject threshold (2026-04-22) — remplace le blocage hardcode
+   // a -25 par un seuil configurable (defaut -20). Scores > threshold gardent
+   // leur comportement de modulation via m_h4SizeFactor.
+   int      m_dealRejectThreshold;
+
    // Indicator handles
    int      m_hATR;
    
@@ -165,7 +170,8 @@ public:
                    string sessionEnd = "18:00",
                    bool allowAsian = false,
                    bool enableTrendFilter = true,
-                   bool enableH4HardVeto = true);
+                   bool enableH4HardVeto = true,
+                   int dealRejectThreshold = -20);
    
    // Main filter check
    // FIX C-6.1 (2026-04-03): timingMode ajouté pour désactiver EMA en POST_NEWS
@@ -203,6 +209,9 @@ public:
    // P2 Veto H4 structurel (2026-04-22)
    bool IsLastH4HardCounter() { return m_lastH4IsHardCounter; }
    bool IsH4HardVetoEnabled() { return m_enableH4HardVeto; }
+
+   // P3 DEAL-v2 reject threshold (2026-04-22)
+   int GetDealRejectThreshold() { return m_dealRejectThreshold; }
 
    // Diagnostic helper (Log A) : expose le test de session sans le filtre on/off
    bool IsInSession() { return InTradingSession(); }
@@ -244,6 +253,7 @@ CQualityFilters::CQualityFilters(string symbol, int magic) {
    m_h4SizeFactor = 1.0;  // DEAL v2: défaut taille normale
    m_enableH4HardVeto = true;       // P2 (2026-04-22): veto structurel actif par defaut
    m_lastH4IsHardCounter = false;
+   m_dealRejectThreshold = -20;     // P3 (2026-04-22): seuil de rejet DEAL-v2 (defaut -20)
 
    ArrayResize(m_recentTrades, 0);
 }
@@ -269,7 +279,8 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
                                   bool enableSession, string sessionStart, string sessionEnd,
                                   bool allowAsian,
                                   bool enableTrendFilter,
-                                  bool enableH4HardVeto) {
+                                  bool enableH4HardVeto,
+                                  int dealRejectThreshold) {
    
    m_enableCooldown = enableCooldown;
    m_cooldownMinutes = cooldownMinutes;
@@ -303,6 +314,8 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
    m_enableH4HardVeto = enableH4HardVeto;
    m_lastH4IsHardCounter = false;
 
+   m_dealRejectThreshold = dealRejectThreshold;
+
    m_hATR = iATR(m_symbol, PERIOD_M15, 14);
 
    if(m_hATR == INVALID_HANDLE) {
@@ -329,6 +342,8 @@ bool CQualityFilters::Initialize(bool enableCooldown, int cooldownMinutes,
          " (", m_sessionStart, " - ", m_sessionEnd, ")");
    Print("  H4 Hard Veto (P2): ", m_enableH4HardVeto ? "ON" : "OFF",
          " (bloque BUY vs BEARISH_LH_LL / SELL vs BULLISH_HH_HL)");
+   Print("  DEAL-v2 Reject Threshold (P3): ", m_dealRejectThreshold,
+         " (score <= threshold -> REJECT)");
    Print("");
    
    return true;
@@ -745,9 +760,15 @@ bool CQualityFilters::CheckTrendH4(string direction, double apiConfidence) {
       return false;
    }
 
-   // Seul cas de blocage : score -25 = H4 contre + API < 60%
-   if(h4Score <= -25) {
-      Print("[DEAL-v2] H4 score -25 -> blocage (H4 contre-tendance + API<60%)");
+   // P3 DEAL-v2 reject threshold (2026-04-22) — remplace le blocage hardcode a -25.
+   // Defaut -20 : bloque les cas "H4 contre + API 60-70%" (score -20) en plus
+   // de l ancien cas "H4 contre + API<60%" (score -25, deja bloque).
+   // Rollback safety : DEAL_Reject_Threshold = -99 -> seuil jamais atteint.
+   // Interaction P2 : ce check n est atteint que si P2 n a pas bloque (return plus haut).
+   if(h4Score <= m_dealRejectThreshold) {
+      Print("[DEAL-v2-REJECT] score=", h4Score, " <= threshold=", m_dealRejectThreshold,
+            " | direction=", direction, " | sizeFactor=", DoubleToString(m_h4SizeFactor, 2),
+            " ignore, trade bloque");
       return false;
    }
 
