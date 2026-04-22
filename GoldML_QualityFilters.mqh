@@ -109,6 +109,11 @@ private:
    // leur comportement de modulation via m_h4SizeFactor.
    int      m_dealRejectThreshold;
 
+   // PR serie 3 (2026-04-22) — tag du dernier motif de blocage dans CheckTrendH4.
+   // Valeurs : "" (pas bloque), "H4-VETO" (P2), "DEAL-v2-REJECT" (P3).
+   // Utilise par l EA pour declencher les alertes SELL opportunity.
+   string   m_lastH4BlockReason;
+
    // Indicator handles
    int      m_hATR;
    
@@ -213,6 +218,9 @@ public:
    // P3 DEAL-v2 reject threshold (2026-04-22)
    int GetDealRejectThreshold() { return m_dealRejectThreshold; }
 
+   // PR serie 3 (2026-04-22) — motif de blocage H4 pour alertes SELL opportunity
+   string GetLastH4BlockReason() { return m_lastH4BlockReason; }
+
    // Diagnostic helper (Log A) : expose le test de session sans le filtre on/off
    bool IsInSession() { return InTradingSession(); }
 
@@ -254,6 +262,7 @@ CQualityFilters::CQualityFilters(string symbol, int magic) {
    m_enableH4HardVeto = true;       // P2 (2026-04-22): veto structurel actif par defaut
    m_lastH4IsHardCounter = false;
    m_dealRejectThreshold = -20;     // P3 (2026-04-22): seuil de rejet DEAL-v2 (defaut -20)
+   m_lastH4BlockReason = "";        // PR serie 3: tag motif blocage H4 (P2/P3)
 
    ArrayResize(m_recentTrades, 0);
 }
@@ -749,6 +758,9 @@ bool CQualityFilters::CheckTrendH4(string direction, double apiConfidence) {
    // Option E activée : calculer le score, jamais bloquer sauf cas extrême
    int h4Score = GetH4ScoreContribution(direction, apiConfidence);
 
+   // PR serie 3 (2026-04-22): reset du tag motif a chaque evaluation
+   m_lastH4BlockReason = "";
+
    // P2 Veto H4 structurel (2026-04-22) — blocage AVANT seuil de score.
    // Cible : BUY vs H4 BEARISH (LH+LL) ou SELL vs H4 BULLISH (HH+HL).
    // H4 CONTRA-LIGHT (1 critere seul) n'est pas impacte.
@@ -757,6 +769,7 @@ bool CQualityFilters::CheckTrendH4(string direction, double apiConfidence) {
       Print("[H4-VETO] ", direction, " bloque: H4 contre-structure forte (",
             counterStruct, ") | score calcule=", h4Score,
             " ignore (veto structurel independant du score DEAL)");
+      m_lastH4BlockReason = "H4-VETO";
       return false;
    }
 
@@ -769,6 +782,7 @@ bool CQualityFilters::CheckTrendH4(string direction, double apiConfidence) {
       Print("[DEAL-v2-REJECT] score=", h4Score, " <= threshold=", m_dealRejectThreshold,
             " | direction=", direction, " | sizeFactor=", DoubleToString(m_h4SizeFactor, 2),
             " ignore, trade bloque");
+      m_lastH4BlockReason = "DEAL-v2-REJECT";
       return false;
    }
 
