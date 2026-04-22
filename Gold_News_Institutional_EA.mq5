@@ -188,6 +188,20 @@ input group "=== DEAL-v2 REJECT THRESHOLD ==="
 input int    DEAL_Reject_Threshold = -20;
 
 //+------------------------------------------------------------------+
+//| SELL OPPORTUNITY ALERTS (PR serie 3 — 2026-04-22)                |
+//+------------------------------------------------------------------+
+// Quand un BUY est bloque par P2 (veto H4) ou P3 (reject DEAL-v2),
+// evalue si le mode LOCAL (H4 + EMA) detecterait un setup SELL a cet
+// instant. Si oui -> log [SELL-OPPORTUNITY] + push notification optionnel.
+// Sinon -> log [SELL-SKIPPED]. AUCUN trade automatique : pure observation.
+// Throttle interne 1h (hardcode) pour eviter le spam mobile sur regime
+// macro persistant (H4 BEARISH peut durer des jours).
+input group "=== SELL OPPORTUNITY ALERTS ==="
+input bool   Enable_SellOpportunity_Alerts = true;    // Master switch
+input bool   SellAlert_Push_Notification   = true;    // Push MT5 mobile natif
+input bool   SellAlert_Logs_Only           = false;   // Si true: pas de push, juste logs
+
+//+------------------------------------------------------------------+
 //| ICT LIQUIDITY (PHASE 1 APPROCHE A)                                |
 //+------------------------------------------------------------------+
 input group "=== ICT LIQUIDITY (PHASE 1) ==="
@@ -1069,6 +1083,45 @@ LocalSignal GetLocalSignal() {
 }
 
 //+------------------------------------------------------------------+
+//| EVALUATE SELL OPPORTUNITY (PR serie 3 — 2026-04-22)              |
+//| Appele uniquement quand un BUY vient d etre bloque par P2 ou P3. |
+//| Check si LOCAL (H4+EMA) detecterait un setup SELL a cet instant. |
+//| AUCUN trade automatique : pure observation + notification.        |
+//+------------------------------------------------------------------+
+void EvaluateSellOpportunity(string buyBlockReason, double currentPrice) {
+   // Throttle interne : 1 eval par heure max (H4 bar = 4h, mais 1h laisse
+   // une fenetre d observation sans noyer le mobile)
+   static datetime lastEvalTime = 0;
+   datetime now = TimeCurrent();
+   if(now - lastEvalTime < 3600) return;
+   lastEvalTime = now;
+
+   // Evaluer LOCAL sans polluer l arbitrage signal principal
+   LocalSignal local = GetLocalSignal();
+
+   string h4State = (g_filters != NULL && g_filters.IsLastH4HardCounter())
+                    ? "BEARISH_LH_LL"
+                    : "CONTRA_LIGHT_OR_RANGING";
+
+   if(local.direction == "SELL" && local.confidence >= Local_Min_Confidence) {
+      string msg = StringFormat(
+         "[SELL SETUP] BUY bloque %s | LOCAL signal SELL @ %.2f | H4 %s | conf %d%% | Decide manuellement",
+         buyBlockReason, currentPrice, h4State, (int)local.confidence);
+
+      Print("[SELL-OPPORTUNITY] ", msg);
+
+      if(SellAlert_Push_Notification && !SellAlert_Logs_Only) {
+         if(!SendNotification(msg))
+            Print("[SELL-OPPORTUNITY] WARNING: SendNotification failed (MT5 mobile configure ?)");
+      }
+   } else {
+      Print("[SELL-SKIPPED] BUY bloque ", buyBlockReason,
+            " mais LOCAL ne detecte pas de setup SELL (dir=", local.direction,
+            ", conf=", (int)local.confidence, "%, seuil=", (int)Local_Min_Confidence, "%)");
+   }
+}
+
+//+------------------------------------------------------------------+
 //| CHECK ENTRY CONDITIONS (Dual-mode: API + Local)                   |
 //+------------------------------------------------------------------+
 void CheckEntry() {
@@ -1227,6 +1280,16 @@ void CheckEntry() {
       else                                    effectiveConfidence = g_Signal.confidence;
 
       FilterResult fr = g_filters.CheckAllFilters(direction, price, timingMode, effectiveConfidence);
+
+      // PR serie 3 (2026-04-22): alerte SELL opportunity quand BUY bloque par P2/P3.
+      // Evalue AVANT REJECT pour que le hook soit invariable vs autres rejets.
+      if(Enable_SellOpportunity_Alerts && direction == "BUY" && !fr.trendOK) {
+         string h4Reason = g_filters.GetLastH4BlockReason();
+         if(h4Reason == "H4-VETO" || h4Reason == "DEAL-v2-REJECT") {
+            EvaluateSellOpportunity(h4Reason, price);
+         }
+      }
+
       if(!fr.passed) {
          REJECT("[" + signalSource + "] QualityFilter: " + fr.blockReason);
       }
