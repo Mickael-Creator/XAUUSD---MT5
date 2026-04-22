@@ -1,0 +1,842 @@
+# État Actuel du Système — Gold ML Trading Platform
+
+> **Photographie de référence** — générée le **2026-04-22** depuis le VPS Linux `86.48.5.126` (vmi2828096).
+> À n'utiliser que comme inventaire de départ pour la plateforme d'analyse quantitative.
+> Ne modifie rien dans le code existant.
+
+---
+
+## Table des matières
+
+1. [Inventaire VPS Linux (86.48.5.126)](#1--inventaire-vps-linux-86485126)
+2. [Inventaire scripts Python](#2--inventaire-scripts-python)
+3. [Architecture réseau](#3--architecture-réseau)
+4. [Modules ICT et scoring](#4--modules-ict-et-scoring)
+5. [Inventaire EA MQL5](#5--inventaire-ea-mql5)
+6. [Configuration système](#6--configuration-système)
+7. [Backups et versioning](#7--backups-et-versioning)
+8. [Problèmes connus et TODO technique](#8--problèmes-connus-et-todo-technique)
+9. [Monitoring et observabilité](#9--monitoring-et-observabilité)
+
+---
+
+## 1 — Inventaire VPS Linux (86.48.5.126)
+
+### 1.1 Services systemd actifs
+
+| Service | État | User | PID | Port | Exec | Description |
+|---|---|---|---|---|---|---|
+| `gold_intelligence.service` | **RUNNING** | `goldml` (systemd unit) mais process en `root` | 419493 | **5002** | `/root/gold_ml_phase4/venv/bin/python3 /root/gold_ml_phase4/gold_intelligence.py` | Signal Engine v2.0 institutional — cache, fallbacks, routes Flask |
+| `gold-automation-bridge.service` | **RUNNING** | `root` | 419492 | — | `/usr/bin/python3 /root/gold_ml_phase4/automation_bridge.py` | Cycle macro toutes les 15 min (US10Y, DXY, VIX, Real Rate, Macro/Geo Score) |
+| `gold-ml-monitor.service` | **RUNNING** | `root` | 419545 (+ workers) | **5000** | `gunicorn -w 2 -b 0.0.0.0:5000 --timeout 120 calendar_monitor:app` | Flask API calendar/FRED/COT/DXY/VIX/H4 signal |
+| `dxy_fetcher.service` | **RUNNING** | `root` | 419465 | — | `/root/gold_ml_phase4/venv/bin/python /root/gold_ml_phase4/dxy_fetcher.py --daemon` | Fetch Yahoo DXY + TNX toutes les 5 min |
+| `vps-api-secured.service` | **RUNNING** | `root` | 419512 | **5001** | `/opt/vps-api/venv/bin/python3 /opt/vps-api/server.py` | Flask API legacy v8.3.7 (404 par défaut, émet alertes email) |
+| `goldml-datacollector.timer` | **DISABLED** | — | — | — | Déclencheur `goldml-datacollector.service` (oneshot, hourly) | Collecte horaire |
+| `goldml-datacollector.service` | **DISABLED** | `root` | — | — | `/usr/bin/python3 /root/gold_ml_phase4/gold_data_collector_working.py` | Data collector (oneshot) |
+| `goldml-api.service` | **DISABLED** | — | — | — | — | [À CLARIFIER AVEC MICKAËL] fichier unit probablement obsolète |
+| `goldml-bridge.service` | **DISABLED** | — | — | — | — | [À CLARIFIER AVEC MICKAËL] legacy |
+| `goldml-calendar-api.service` | **DISABLED** | — | — | — | — | [À CLARIFIER AVEC MICKAËL] legacy |
+
+> Démarrage commun de tous les services actifs : **2026-04-09 06:03:44 CEST** (donc uptime ~1 sem 6 jours au snapshot).
+
+### 1.2 Cron jobs (utilisateur `root`)
+
+```cron
+# Collecte macro (gold_data_collector_working.py) toutes les 30 min
+*/30 * * * * cd /root/gold_ml_phases && /root/gold_ml_phases/venv/bin/python gold_data_collector_working.py >> /var/log/gold_collector.log 2>&1
+
+# Optimization ML toutes les 2h
+0 */2 * * * cd /root/gold_ml_phases && /root/gold_ml_phases/ml_venv/bin/python run_ml_optimization.py >> /root/gold_ml_phases/cron-ml.log 2>&1
+
+# Check quotidien + cleanup logs à 08:00
+0 8 * * * /root/gold_ml_phases/daily_check.sh >> /root/gold_ml_phases/logs/daily_check.log 2>&1
+
+# Rotation des logs le dimanche à 03:00
+0 3 * * 0 find /root/gold_ml_phases/logs -name "*.log" -mtime +7 -delete && find /var/log -name "*.log" -size +100M -delete
+
+# Auto-restart gold-ml-monitor toutes les 10 min si down
+*/10 * * * * systemctl is-active --quiet gold-ml-monitor || (systemctl restart gold-ml-monitor && echo "$(date): Service redémarré" >> /var/log/auto-restart.log)
+
+# Backup des DBs à 04:00
+0 4 * * * mkdir -p /root/backups/$(date +\%Y\%m\%d) && cp /root/gold_ml_phases/*.db /root/backups/$(date +\%Y\%m\%d)/ 2>/dev/null
+
+# Alerte disque >80% à 09:00
+0 9 * * * DISK_USAGE=$(df / | tail -1 | awk '{print $5}' | sed 's/%//'); [ "$DISK_USAGE" -gt 80 ] && echo "$(date): WARNING - Disk usage at ${DISK_USAGE}%" >> /var/log/disk_alerts.log
+
+# Maintenance gold_ml à 03:00
+0 3 * * * /root/gold_ml_maintenance.sh
+
+# VPS check quotidien à 08:05
+5 8 * * * /root/gold_ml_phase4/vps_check_final.sh >> /root/gold_ml_phase4/vps_check_daily.log 2>&1
+
+# Claude alert monitor toutes les 2 min
+*/2 * * * * /root/gold_ml_phase4/goldml_alert_monitor.sh
+```
+
+> ⚠️ **[À CLARIFIER AVEC MICKAËL]** — plusieurs tâches cron pointent vers `/root/gold_ml_phases/` (pluriel) alors que le répertoire actif en production est `/root/gold_ml_phase4/` (singulier au pluriel inversé). À vérifier si `gold_ml_phases` existe ou si ces crons sont morts.
+
+### 1.3 Ports ouverts et firewall UFW
+
+```
+Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp   (SSH)             ALLOW       Anywhere
+5000/tcp (gold-ml-monitor) ALLOW       Anywhere
+5001/tcp (vps-api-secured) ALLOW       Anywhere
+5002/tcp (gold_intelligence) ALLOW     Anywhere
+(IPv6 équivalents aussi ouverts)
+```
+
+Ports en `LISTEN` au moment du snapshot :
+
+| Port | Process | Binding | Rôle |
+|---|---|---|---|
+| 22 | `sshd` | `0.0.0.0` | SSH |
+| 53 | `systemd-resolved` | `127.0.0.53` + `127.0.0.54` | Résolveur DNS local |
+| 5000 | `gunicorn` (calendar_monitor) | `0.0.0.0` | API calendar/FRED/COT/H4 |
+| 5001 | `python3` (vps-api) | `0.0.0.0` | API legacy Flask |
+| 5002 | `python3` (gold_intelligence) | `0.0.0.0` | Signal Engine (consommé par EA) |
+
+> `nginx` n'est **pas installé** sur le VPS malgré la présence d'un `nginx_goldml.conf` dans `/root/gold_ml_phase4/`.
+> `fail2ban` tourne (protection SSH).
+
+### 1.4 Répertoires principaux
+
+| Chemin | Taille | Rôle |
+|---|---|---|
+| `/root/gold_ml_phase4/` | **1.8 G** | Répertoire applicatif principal (code + DBs + logs) |
+| `/root/gold_ml_phase4/logs/` | 171 M | Logs rotationnés (WatchedFileHandler + .gz) |
+| `/root/gold_ml_phase4/venv/` | — | Venv Python principal |
+| `/root/gold_ml_phase4/ml_venv/` | — | Venv Python pour `calendar_monitor` (gunicorn) |
+| `/root/backups/` | 1.3 M | Backups horodatés (`YYYYMMDD`) issus du cron 04:00 |
+| `/root/gold_ml_phase4/archive_obsolete/` | — | Archives de code legacy |
+| `/opt/vps-api/` | — | Legacy API v8.3.7 |
+| `/etc/goldml/.env` | — | Secrets (API_TOKEN, HMAC_SECRET, ANTHROPIC_API_KEY, FRED_API_KEY) |
+| `/home/traderadmin/` | — | Copie de travail EA MQL5 + clone git `XAUUSD---MT5` |
+| `/home/traderadmin/Turtle/` | — | Projet EA Turtle séparé (FTMO 100K) |
+
+### 1.5 Bases de données SQLite
+
+| Fichier | Taille | Contenu présumé |
+|---|---|---|
+| `/root/gold_ml_phase4/gold_intelligence.db` | **611 MB** | Cache signal + historique (init par `gold_intelligence.py`) |
+| `/root/gold_ml_phase4/gold_ml_database.db` | 2.3 MB | Table `automation_data` (`automation_bridge.py`) + calendrier |
+| `/root/gold_ml_phase4/cot_data.db` | 16 kB | Cache COT Legacy Futures Only |
+| `/root/gold_ml_database.db` | 12 kB | [À CLARIFIER AVEC MICKAËL] doublon ? |
+
+---
+
+## 2 — Inventaire scripts Python
+
+### 2.1 Scripts actifs en production (`/root/gold_ml_phase4/`)
+
+| Script | Taille | Dernière modif | Rôle | I/O | Appelé par |
+|---|---|---|---|---|---|
+| `gold_intelligence.py` | 50 kB | 2026-04-06 | **Signal Engine v2.0** — Flask port 5002, cache TTL + refresh loop, fallback multi-niveaux, HMAC signing | IN : REST HTTP GET/POST | systemd `gold_intelligence.service` |
+| `automation_bridge.py` | 10.8 kB | 2026-02-01 | Fetch Yahoo (DXY, VIX, US10Y, Fed target, Real Rate) toutes les 15 min → SQLite + webhook | IN : yfinance / OUT : `gold_ml_database.db`, webhook.site | systemd `gold-automation-bridge.service` |
+| `calendar_monitor.py` | 38.5 kB | 2026-04-02 | Flask port 5000 — agrège calendar/FRED/COT/DXY/VIX + H4 signal + optimal thresholds | IN : HTTP GET / OUT : JSON | gunicorn (systemd `gold-ml-monitor.service`) |
+| `dxy_fetcher.py` | 6.9 kB | 2026-01-28 | Daemon : pull DXY + TNX (Yahoo) toutes les 5 min | OUT : DB + log | systemd `dxy_fetcher.service` |
+| `news_fetcher_v2.py` | 9.5 kB | 2026-03-30 | Fetch ForexFactory RSS | IN : ForexFactory / OUT : dict news | `gold_intelligence.py` (import) |
+| `news_trading_signal.py` | 35.8 kB | 2026-04-06 | Classe `NewsTradingAnalyzer` (timing BLACKOUT/PRE/POST + fade spike) | dataclass → JSON | `gold_intelligence.py` (import) |
+| `claude_decision_engine.py` | 24.3 kB | 2026-04-03 | Enrichissement signal via API Anthropic (modèle `claude-sonnet-4-20250514`) | IN : signal dict + Anthropic | **DÉSACTIVÉ** dans `gold_intelligence.py` depuis 2026-04-06 (« redondant avec Option D ») |
+| `fred_service.py` | 8.8 kB | 2026-04-03 | Wrappers FRED : TIPS yield, breakeven, Fed funds, yield curve | IN : FRED API / OUT : float | `gold_intelligence.py`, `calendar_monitor.py` |
+| `cot_service.py` | 18.5 kB | 2026-03-24 | Fetch COT Legacy Futures Only (hebdo) | IN : CFTC / OUT : DB | `calendar_monitor.py` |
+| `cot_fetcher.py` | 3.8 kB | 2025-12-07 | Variante simple COT | — | legacy |
+| `cot_advanced_fetcher.py` | 15.7 kB | 2025-12-07 | Variante avancée COT | — | legacy |
+| `cot_endpoint.py` | 43.9 kB | 2025-12-07 | Endpoint COT | — | legacy |
+| `backend_api.py` | 26.5 kB | 2026-03-23 | Flask API (routes /v1/api/macro, /dxy_data, /vix_data, etc.) | HTTP | **Non exposé** (pas de systemd unit actif) |
+| `python_sniper.py` | 37.6 kB | 2026-04-03 | Ancienne logique sniper Python (ICT) | — | **DÉSACTIVÉ** (ICT migré dans EA local `CSniperM15`) |
+| `gold_data_collector_working.py` | 5.3 kB | 2025-12-14 | Collecte horaire macro | OUT : DB | cron `*/30` ou timer systemd |
+| `gold_ml_to_mt5_bridge_files.py` | 9.5 kB | 2025-11-01 | Bridge fichiers → MT5 | — | [À CLARIFIER] |
+| `mt5_signal_sender.py` / `mt5_signal_sender_files.py` | 2-8.7 kB | 2025-10 | Envoi signal vers MT5 | — | legacy |
+| `macro_data_endpoint.py` | 6.7 kB | 2025-10-11 | Endpoint macro | — | legacy |
+| `ml_bridge.py` | 10.2 kB | 2025-10-12 | Bridge ML | — | legacy |
+| `signal_api.py` | 2.0 kB | 2025-12-07 | — | — | legacy |
+| `test_claude_decision_engine.py` | 13.2 kB | 2026-04-02 | Tests unitaires Claude engine | pytest | Manuel |
+| `test_python_sniper.py` | 10.9 kB | 2026-03-26 | Tests sniper Python | pytest | Manuel |
+
+### 2.2 Pipeline ML (legacy, dans `/root/gold_ml_phase4/`)
+
+Scripts numérotés 1 à 6, exécutés séquentiellement par `RUN_ALL_PIPELINE.py` :
+
+| # | Script | Rôle |
+|---|---|---|
+| 1 | `1_extract_vps_data.py` | Extraction données VPS |
+| 2 | `2_download_yahoo_data.py` | Téléchargement Yahoo historique |
+| 3 | `3_prepare_ml_dataset_ROBUST.py` (dernière version retenue) | Préparation dataset (3 variantes existent : original, FIXED, ROBUST) |
+| 4 | `4_train_ml_model.py` | Entraînement scikit-learn |
+| 5 | `5_optimize_thresholds.py` | Optimisation `optimal_thresholds.json` (scikit-optimize) |
+| 6 | `6_update_pinescript_thresholds.py` | Export Pine Script |
+
+> **État : PROBABLEMENT INACTIF** au jour du snapshot — pas de service actif qui l'appelle, seuls les crons `gold_ml_phases` (pluriel) le référencent et ce chemin n'existe pas.
+
+### 2.3 Scripts shell de maintenance
+
+| Script | Rôle |
+|---|---|
+| `/root/gold_ml_maintenance.sh` | Cron 03:00 quotidien |
+| `/root/gold_ml_phase4/vps_check_final.sh` | Cron 08:05 — écrit `vps_check_daily.log` |
+| `/root/gold_ml_phase4/goldml_alert_monitor.sh` | Cron */2 min — surveillance alertes |
+| `/root/diagnostic.sh`, `/root/diagnostic_final.sh` | Diagnostic manuel |
+| `/root/fix_vps_quick.sh` | Réparation manuelle |
+| `/root/gml-full-check.sh`, `/root/gml-full-diagnostic.sh` | Audits complets |
+| `/root/gold_ml_status.sh` | Statut express |
+| `/root/test_backend_api_v4.sh` | Test API |
+| `/home/traderadmin/check_goldml.sh` | Copie locale |
+
+### 2.4 Dépendances Python principales
+
+**Venv `/root/gold_ml_phase4/venv/`** (utilisé par `gold_intelligence` et `dxy_fetcher`) :
+
+```
+anthropic==0.86.0        APScheduler==3.11.1      beautifulsoup4==4.13.5
+curl_cffi==0.13.0        feedparser==6.0.12       Flask==3.1.2
+joblib==1.5.2            matplotlib==3.10.6       numpy==2.3.3
+pandas==2.3.2            pydantic==2.12.5         python-dotenv==1.2.2
+requests==2.32.5         scikit-learn==1.7.2      scipy==1.16.2
+seaborn==0.13.2          ta==0.11.0               websockets==15.0.1
+Werkzeug==3.1.3          yfinance==0.2.66
+```
+
+**Venv `/root/gold_ml_phase4/ml_venv/`** (utilisé par `calendar_monitor` gunicorn) :
+
+```
+Flask==3.1.2             gunicorn==23.0.0         numpy==2.3.3
+pandas==2.3.3            pyaml==25.7.0            PyYAML==6.0.3
+requests==2.32.5         schedule==1.2.2          scikit-learn==1.7.2
+scikit-optimize==0.10.2  scipy==1.16.2            websockets==15.0.1
+```
+
+---
+
+## 3 — Architecture réseau
+
+### 3.1 Diagramme textuel des flux
+
+```
+                     ┌──────────────────────────────┐
+                     │    VPS Windows (FTMO MT5)    │
+                     │  Gold_News_Institutional_EA  │
+                     │    (magic 888892)            │
+                     └───────────────┬──────────────┘
+                                     │  HTTP GET/POST
+                    WebRequest       │  - Bearer API_Auth_Token
+                    timeout 5000 ms  │  - Refresh 30 s
+                                     ▼
+    ┌──────────────────────────────────────────────────────────────┐
+    │                  VPS Linux — 86.48.5.126                     │
+    │                                                              │
+    │ ┌────────────────────┐   ┌────────────────────────────┐      │
+    │ │  Port 5002         │   │  Port 5000                 │      │
+    │ │  gold_intelligence │   │  calendar_monitor          │      │
+    │ │  (Flask raw)       │   │  (gunicorn x2 workers)     │      │
+    │ │                    │   │                            │      │
+    │ │  /v1/news_trading  │   │  /macro_data               │      │
+    │ │    _signal/quick   │   │  /h4_signal                │      │
+    │ │  /v1/market_data   │   │  /cot_data                 │      │
+    │ │  /v1/health        │   │  /dxy_data                 │      │
+    │ │  /gold_intelligence│   │  /vix_data                 │      │
+    │ │    /quick /health  │   │  /optimal_thresholds       │      │
+    │ │    /news /geo…     │   │  /market_context           │      │
+    │ └─────────┬──────────┘   └────────────┬───────────────┘      │
+    │           │ shared cache via SQLite   │                      │
+    │           │                           │                      │
+    │           ▼                           ▼                      │
+    │ ┌──────────────────────────────────────────────────┐         │
+    │ │  SQLite : gold_intelligence.db (611 MB)          │         │
+    │ │  SQLite : gold_ml_database.db  (2.3 MB)          │         │
+    │ └──────────────────────────────────────────────────┘         │
+    │           ▲                           ▲                      │
+    │           │                           │                      │
+    │ ┌─────────┴──────────┐   ┌────────────┴────────────┐         │
+    │ │ automation_bridge  │   │  dxy_fetcher (daemon)   │         │
+    │ │ (cycle 15 min)     │   │  cycle 5 min            │         │
+    │ └─────────┬──────────┘   └────────────┬────────────┘         │
+    │           │ Yahoo Finance             │ Yahoo Finance        │
+    │           │ + webhook.site            │                      │
+    │           │                           │                      │
+    │ ┌─────────┴───────────────────────────┴───────────┐          │
+    │ │ Port 5001 — vps-api-secured.server (legacy)     │          │
+    │ │ (Bearer API_KEY hardcodé, émet alertes email)   │          │
+    │ └─────────────────────────────────────────────────┘          │
+    └──────────────────┬───────────────────────────────────────────┘
+                       │
+                       ▼
+         FRED, CFTC COT, ForexFactory RSS,
+         alternative.me (Fear & Greed), Yahoo Finance,
+         Anthropic API (désactivée côté runtime)
+```
+
+### 3.2 Endpoints HTTP (exposés à l'EA et outils externes)
+
+#### `gold_intelligence` — port **5002** (endpoint principal consommé par l'EA)
+
+| Méthode | Route | Rôle |
+|---|---|---|
+| GET  | `/news_trading_signal/quick` | Signal rapide News Trading (alias v0) |
+| GET  | `/v1/news_trading_signal/quick` | Signal rapide News Trading (**consommé par l'EA** via `API_News_URL`) |
+| POST | `/v1/market_data` | Ingestion market data (**consommé par l'EA** via `API_MarketData_URL`) |
+| GET  | `/v1/health` | Healthcheck v1 |
+| GET  | `/news_trading_signal` | Signal complet |
+| GET  | `/gold_intelligence` | Vue complète du signal |
+| GET  | `/gold_intelligence/quick` | Vue rapide |
+| GET  | `/gold_intelligence/health` | Healthcheck détaillé |
+| GET  | `/gold_intelligence/news` | News uniquement |
+| GET  | `/gold_intelligence/geopolitics` | Géopolitique uniquement |
+| GET  | `/tmp/ea_download` / `/tmp/bridge_download` | Téléchargement fichiers |
+
+Sécurité : décorateur `_require_auth` basé sur `API_TOKEN` (`/etc/goldml/.env`) + réponses HMAC-signées via `HMAC_SECRET`.
+
+#### `calendar_monitor` — port **5000**
+
+| Méthode | Route | Rôle |
+|---|---|---|
+| GET | `/news_trading_signal/quick` | Healthcheck (EA safety) |
+| GET | `/macro_data` | Macro aggregé |
+| GET | `/news_status` | Statut news |
+| GET | `/optimal_thresholds` | Seuils ML optimisés (JSON persistant) |
+| GET | `/health` | Healthcheck |
+| GET | `/dxy_data` / `/dxy_status` | DXY |
+| GET | `/h4_signal` | Signal H4 (composite) |
+| GET | `/server_time` | Heure serveur |
+| GET | `/vix_data` | VIX |
+| GET | `/market_context` | Contexte marché complet |
+| GET | `/cot_data` | COT (Legacy Futures Only) |
+
+#### `vps-api-secured` — port **5001** (legacy)
+
+Répond `404` sur `/` par défaut (confirmé dans les logs). Accepte auth via `API_KEY` hardcodé dans `server.py`.
+Bearer key : `Gold_ML_VPS_2025_SecretKey_LS_Mickael_ABC123` → **[À CLARIFIER AVEC MICKAËL]** encore utilisé ou peut-être désactivé.
+
+### 3.3 Flux MT5 ↔ VPS Linux (synthèse côté EA)
+
+```mql5
+// Dans Gold_News_Institutional_EA.mq5 (lignes 47-52)
+input string API_News_URL        = "http://86.48.5.126:5002/v1/news_trading_signal/quick";
+input string API_MarketData_URL  = "http://86.48.5.126:5002/v1/market_data";
+input int    API_Timeout         = 5000;
+input int    API_Refresh_Seconds = 30;
+input string API_Auth_Token      = "";   // À renseigner par l'utilisateur EA
+```
+
+L'EA n'appelle donc directement **que le port 5002**. Le port 5000 est consommé indirectement par `gold_intelligence` (qui lui-même lit les mêmes DBs).
+
+---
+
+## 4 — Modules ICT et scoring
+
+> **Toute la logique ICT a été migrée de `python_sniper.py` (VPS) vers l'EA local `CSniperM15`** (commentaire explicite dans `gold_intelligence.py:29`).
+> Le scoring documenté ici est celui implémenté dans `GoldML_SniperEntry_M15.mqh`.
+
+### 4.1 Break of Structure (BOS)
+
+- **Fichier** : `GoldML_SniperEntry_M15.mqh` — `CSniperM15::DetectBOS()` (ligne 921)
+- Recherche un BOS M15 dans une fenêtre **`Sniper_Max_Bars_After_BOS = 60` bars** (15 h sur M15) après le sweep
+- Cohérence `sweepBar` garantie via `DetectBOS(direction, sweepBar)`
+- Struct `BreakOfStructure { found, barsSinceBOS, … }`
+
+### 4.2 CHoCH (Change of Character)
+
+- **Fichier** : `GoldML_ICT_Detector.mqh` — `DetectShiftM5()` (ligne 435)
+- Fix P1 (2026-04-17) : CHoCH désormais valide **sur les 3 dernières bougies fermées** (au lieu de `close[1]` seul, qui manquait les CHoCH légèrement antérieurs)
+- BOS considéré impulsif si `range > 1.2 * ATR`
+- Retient toujours le **CHoCH le plus récent**
+
+### 4.3 FVG (Fair Value Gap)
+
+- **Fichier** : `GoldML_ICT_Detector.mqh` — `FindLatestFVG(direction, …)` (ligne 226)
+- Minimum **5 bars** d'historique requis
+- Bullish : `low[i-1] > high[i+1]` (gap up)
+- Bearish : `high[i-1] < low[i+1]` (gap down)
+- Struct `ICT_PDArray { type = ICT_PD_FVG, name = "FVG", … }`
+- Tolérance d'alignement `0.1 × ATR` (fix P2 2026-04-17)
+
+### 4.4 OB (Order Block)
+
+- **Fichier** : `GoldML_ICT_Detector.mqh`
+- Minimum **5 bars** (aligné avec le minimum FVG)
+- Retourne `ICT_PDArray { type = ICT_PD_OB, name = "OB" }`
+- Pullback OTE fallback si pas d'OB (commit `c427afc`)
+
+### 4.5 Liquidity Sweeps
+
+- **Fichier** : `GoldML_LiquidityLevels.mqh` (`CLiquidityLevels`)
+- Paramètre EA : `Enable_ICT_Liquidity = true` (active la détection ICT, sinon fallback pivots 4/4)
+- Niveaux détectés et leur **force** (0-100) :
+
+| Type | Force | Description |
+|---|---|---|
+| `PWH` / `PWL` | 90 | Previous Week High/Low |
+| `PDH` / `PDL` | 80 | Previous Day High/Low |
+| `LONDON_H` / `LONDON_L` | 75 | London session High/Low |
+| `ASIAN_H` / `ASIAN_L` | 70 | Asian session High/Low |
+| `EQL_H` / `EQL_L` | 65 | Equal Highs / Equal Lows |
+
+- Cap : **max 3 EQL_H + 3 EQL_L** (`MAX_EQL = 3`)
+- Gap minimum **20 bougies M15** (~5 h) entre 2 EQL du même côté (fix 2026-04-17)
+- Scan `i = 5..95` (soit ~15 h de lookback)
+- Les niveaux sweepés sont marqués `active = false` + `sweptAt = GMT time` et ne sont plus réutilisés (fix `ea57b4d` — anti double-signal)
+
+### 4.6 Formule de scoring Sniper (0-100)
+
+Implémentée dans `CSniperM15::CalculateScore()` — `GoldML_SniperEntry_M15.mqh:1459` :
+
+| Composant | Points | Condition |
+|---|---|---|
+| **Sweep détecté** | +20 | Base |
+| Sweep virtuel (BOS Direct bypass) | +15 | Fix A1 2026-04-04 — demi-score sweep |
+| **Niveau ICT balayé** | | Selon la force du niveau : |
+| → `PWH`/`PWL` | +35 | |
+| → `PDH`/`PDL` | +30 | |
+| → `LONDON_H/L` | +25 | |
+| → `ASIAN_H/L` | +22 | |
+| → `EQL_H/L` | +20 | |
+| → inconnu | +20 | |
+| **BOS confirmé** | +20 | |
+| BOS récent (≤ 5 bars) | +5 | |
+| **Pullback dans PD array** | +15 | |
+| → Type `FVG` | +5 | |
+| → Type `OB` | +5 | |
+| **CHoCH M5** | +10 | Confirmation timing |
+| **BOS M5** | +5 | Confirmation timing |
+| **Barres depuis sweep ≤ 5** | +5 | Fraîcheur sweep |
+| **Confirmation candle M5** | +10 | `patternScore ≥ 75` accepté en remplacement de CHoCH |
+
+Patterns M5 eux-mêmes scorés (`confirm.patternScore`) :
+- 90 : configuration premium
+- 85 / 75 / 60 / 50 / 40 : configurations progressivement plus faibles
+- `+10` bonus si `candleConfirm = true`
+
+**Score minimum par défaut (input EA) : `Sniper_Min_Score = 55`** (abaissé après recalibrage).
+
+### 4.7 Seuils DEAL v2 (CONTRA-LIGHT, CONTRA-STRONG, ALIGNED)
+
+Implémenté dans `CQualityFilters::GetH4ScoreContribution()` — `GoldML_QualityFilters.mqh:580-662`.
+
+**Détection structure H4** (3 swings H/L) :
+- `HH + HL`  → **BULLISH ALIGNED**
+- `LH + LL`  → **BEARISH ALIGNED** (= CONTRA-STRONG pour un BUY)
+- 1 seul critère cassé (`LH` xor `LL`) → **CONTRA-LIGHT**
+- Sinon (HH+LL ou LH+HL) → **RANGING**
+
+**Table des scores et sizeFactor** (pour une direction `BUY`, miroir symétrique en `SELL`) :
+
+| État H4 | API confidence | Score | sizeFactor | Log |
+|---|---|---|---|---|
+| `ALIGNED` (HH+HL) | — | **+25** | **1.00** | `H4 BULLISH -> +25 pts \| size 100%` |
+| `RANGING` | ≥ 70 % | +10 | 0.85 | `H4 RANGING + API>=70% -> +10 \| size 85%` |
+| `RANGING` | 60-70 % | 0 | 0.70 | `H4 RANGING + API 60-70% -> 0 \| size 70%` |
+| `RANGING` | < 60 % | −10 | 0.50 | `H4 RANGING + API<60% -> -10 \| size 50%` |
+| `CONTRA-LIGHT` | ≥ 70 % | **−5** | **0.65** | `H4 CONTRA-LIGHT + API>=70% -> -5 \| size 65%` |
+| `CONTRA-LIGHT` | 60-70 % | −15 | 0.50 | `H4 CONTRA-LIGHT + API 60-70% -> -15 \| size 50%` |
+| `CONTRA-LIGHT` | < 60 % | −25 | **0.00 (BLOCKED)** | `H4 CONTRA-LIGHT + API<60% -> -25 \| BLOCKED` |
+| `CONTRA-STRONG` (LH+LL) | ≥ 70 % | **−10** | **0.50** | `H4 BEARISH (LH+LL) + API>=70% -> -10 \| size 50%` |
+| `CONTRA-STRONG` | 60-70 % | −20 | 0.35 | `H4 BEARISH (LH+LL) + API 60-70% -> -20 \| size 35%` |
+| `CONTRA-STRONG` | < 60 % | −25 | **0.00 (BLOCKED)** | `H4 BEARISH (LH+LL) + API<60% -> -25 \| BLOCKED` |
+
+**Règle de blocage unique** : `h4Score ≤ −25` (autrement dit : H4 contre-tendance avec API confidence < 60 %).
+
+**Exception POST_NEWS_ENTRY** : fade trade par design → `trendOK = true` forcé, `m_h4SizeFactor = 1.0` réinitialisé (fix B3 2026-04-14).
+
+**Combinaison avec ConflictFactor** : la formule finale est `MIN(conflictFactor, dealFactor)` (pas de cumul) — `Gold_News_Institutional_EA.mq5:1294`.
+
+### 4.8 Seuils API confidence côté EA
+
+| Paramètre | Valeur | Rôle |
+|---|---|---|
+| `Min_Confidence` | 60.0 | Confidence minimum pour trader (mode API) |
+| `Local_Min_Confidence` | 55.0 | Fallback local quand l'API est silencieuse |
+
+---
+
+## 5 — Inventaire EA MQL5
+
+### 5.1 Projet principal : `XAUUSD---MT5` (repo `/home/traderadmin`)
+
+Fichiers trackés git :
+
+| Fichier | Lignes | Rôle | Dernière modif |
+|---|---|---|---|
+| `Gold_News_Institutional_EA.mq5` | **2142** | Point d'entrée EA (OnInit/OnTick/OnTrade), magic `888892`, version `2.10` | 2026-04-17 18:24 |
+| `GoldML_SniperEntry_M15.mqh` | **1874** | `CSniperM15` — détection sweep/BOS/CHoCH/pullback, scoring 0-100 | 2026-04-17 18:24 |
+| `GoldML_PositionManager_V2.mqh` | 901 | `CPositionManagerV2` — partial TP, BE, trailing ATR | 2026-04-15 20:05 |
+| `GoldML_QualityFilters.mqh` | 948 | `CQualityFilters` — cooldown, daily limit, range filter, **DEAL v2 H4** | 2026-04-17 13:35 |
+| `GoldML_ICT_Detector.mqh` | 527 | `CICT_Detector` — primitives CHoCH/BOS/FVG/OB, `DetectShiftM5` | 2026-04-17 14:07 |
+| `GoldML_LiquidityLevels.mqh` | 515 | `CLiquidityLevels` — PDH/PDL, PWH/PWL, session, EQL, `MarkLevelSwept` | 2026-04-17 13:57 |
+| `GoldML_JsonParser.mqh` | 221 | Parser JSON robuste (fix AUDIT-C1) | 2026-03-27 14:44 |
+| `Gold_News_Institutional_EA.mq5.before_restore` | — | Backup avant restauration | 2026-04-02 18:01 |
+
+Dépendances entre modules :
+
+```
+Gold_News_Institutional_EA.mq5
+├── <Trade/Trade.mqh>, <Trade/PositionInfo.mqh>  (MQL5 stdlib)
+├── GoldML_ICT_Detector.mqh
+├── GoldML_SniperEntry_M15.mqh
+│     └── GoldML_ICT_Detector.mqh
+│     └── GoldML_LiquidityLevels.mqh
+├── GoldML_PositionManager_V2.mqh
+├── GoldML_QualityFilters.mqh
+├── GoldML_JsonParser.mqh   (Audit-C1 : parser JSON robuste)
+└── GoldML_LiquidityLevels.mqh
+```
+
+### 5.2 Inputs de l'EA (valeurs par défaut du snapshot)
+
+#### API News Trading
+```
+API_News_URL        = "http://86.48.5.126:5002/v1/news_trading_signal/quick"
+API_MarketData_URL  = "http://86.48.5.126:5002/v1/market_data"
+API_Timeout         = 5000     (ms)
+API_Refresh_Seconds = 30
+API_Auth_Token      = ""       (à configurer)
+```
+
+#### Trading rules
+```
+Min_Confidence                = 60.0
+Allow_PreNews_Trading         = true
+Allow_PostNews_Fade           = true
+Allow_Counter_Signal_Trading  = true
+```
+
+#### Sniper SMC (M15)
+```
+Sniper_Swing_Lookback    = 80         (= 20 h sur M15)
+Sniper_Min_Swing_Bars    = 4
+Sniper_Fib_Entry_Min     = 0.50
+Sniper_Fib_Entry_Max     = 0.786      (ICT Golden Pocket)
+Sniper_Fib_Optimal       = 0.618
+Sniper_Max_Bars_After_BOS   = 60      (= 15 h)
+Sniper_Max_Bars_After_Sweep = 60
+Sniper_Require_Sweep     = true
+Sniper_Require_BOS       = true
+Sniper_Min_RR            = 2.0
+Sniper_Min_Score         = 55
+Sniper_Max_Spread        = 7.0 pips
+Sniper_SL_Buffer_Pips    = 3.0
+Sniper_SL_Min_Pips       = 25.0
+Sniper_SL_Max_Pips       = 55.0
+Use_M5_Confirmation      = true
+```
+
+#### Position management
+```
+Enable_Partial_TP        = true
+Partial_Percent          = 40.0
+Partial_At_RR            = 1.0
+Move_To_BE_After_Partial = true
+BE_Buffer_Pips           = 3.0
+Enable_Trailing          = true
+Trail_ATR_Mult           = 1.5
+```
+
+#### Risk management FTMO
+```
+Risk_Percent         = 1.0           (% equity per trade)
+Max_Risk_Percent     = 2.0
+Base_Lot_Size        = 0.10          (DEPRECATED)
+Magic_Number         = 888892
+Max_Daily_Loss_EUR   = 400.0
+Max_Daily_Trades     = 6
+FTMO_Daily_DD_Limit  = 4.5           (%)
+FTMO_Initial_Balance = 10000.0
+FTMO_Total_DD_Limit  = 9.0           (%)
+```
+
+#### Sessions, test mode, ICT, divers
+```
+Phase_Test_Force_Lot   = 0.01       (0.0 = désactivé)
+Enable_Session_Filter  = true
+Session_Start          = "00:00"
+Session_End            = "21:00"
+Enable_Local_Mode      = true
+Local_Min_Confidence   = 55.0
+Local_Size_Factor      = 0.7
+Local_Max_Daily_Trades = 3
+Enable_ICT_Liquidity   = true        (Phase 1)
+Enable_Dashboard       = true
+Enable_Alerts          = true
+```
+
+### 5.3 Projet secondaire : `Turtle` (FTMO 100K, indépendant)
+
+Situé dans `/home/traderadmin/Turtle/` — dossier non présent dans le repo principal.
+
+| Fichier | Rôle |
+|---|---|
+| `MQL5/Experts/Turtle/TURTLE_EA.mq5` | EA Turtle (Dennis 1983), Systems 1 & 2 |
+| `MQL5/Include/Turtle/AtrCalculator.mqh` | Calcul ATR 20j |
+| `MQL5/Include/Turtle/FtmoRules.mqh` | Garde-fous FTMO |
+| `MQL5/Include/Turtle/Logger.mqh` | Logging |
+| `MQL5/Include/Turtle/RiskManager.mqh` | Risk % dynamique |
+| `MQL5/Include/Turtle/SymbolPresets.mqh` | Presets BTC/GOLD/US100/US30/OIL |
+| `MQL5/Include/Turtle/TradeManager.mqh` | Gestion ordres |
+| `MQL5/Include/Turtle/TurtleDetector.mqh` | Détection breakouts 20/55/10 |
+
+Presets :
+
+| Preset | Symbole | System | Entry/Exit (jours) | ATR Mult | Risk % |
+|---|---|---|---|---|---|
+| BTC   | BTCUSD     | S1 | 20/10 | 2.0 | **0.5** |
+| GOLD  | XAUUSD     | S1 | 20/10 | 2.0 | 1.0 |
+| US100 | US100.cash | S1 | 20/10 | 2.0 | 1.0 |
+| US30  | US30.cash  | S1 | 20/10 | 2.0 | 1.0 |
+| OIL   | USOIL      | **S2** | 55/20 | **3.0** | 1.0 |
+| CUSTOM | *         | User | User | User | User |
+
+Un backup flat existe dans `/home/traderadmin/Turtle_flat_backup/`.
+
+---
+
+## 6 — Configuration système
+
+### 6.1 OS et runtime
+
+| Élément | Valeur |
+|---|---|
+| Distribution | **Ubuntu 24.04.3 LTS (Noble Numbat)** |
+| Kernel | `Linux 6.8.0-94-generic` (PREEMPT_DYNAMIC, Jan 2026) |
+| Hostname | `vmi2828096` |
+| Python système | **3.12.3** — `/usr/bin/python3` |
+| Gestionnaire de paquets | `apt` / `dpkg` |
+| Virtualenvs | `/root/gold_ml_phase4/venv/` + `/root/gold_ml_phase4/ml_venv/` + `/opt/vps-api/venv/` |
+| Init system | `systemd` |
+| Firewall | **UFW actif** (voir §1.3) |
+| Intrusion | **fail2ban** actif |
+
+### 6.2 MT5
+
+- MT5 tourne sur un **VPS Windows séparé** (pas sur ce VPS Linux).
+- Version MT5 : [À CLARIFIER AVEC MICKAËL] — probablement MT5 build récent compatible FTMO.
+
+### 6.3 Variables d'environnement critiques
+
+Fichier `/etc/goldml/.env` (chargé par `gold_intelligence.service` via `EnvironmentFile=`) :
+
+| Variable | Rôle | Stocké |
+|---|---|---|
+| `API_TOKEN` | Auth Bearer pour les routes protégées | ✅ |
+| `HMAC_SECRET` | Signature HMAC des réponses | ✅ |
+| `ANTHROPIC_API_KEY` | Claude Decision Engine (actuellement désactivé) | ✅ |
+| `FRED_API_KEY` | Accès à FRED (TIPS, Fed funds, yield curve) | ✅ |
+
+> **Sécurité** : `vps-api-secured/server.py` contient encore en dur `API_KEY = "Gold_ML_VPS_2025_SecretKey_LS_Mickael_ABC123"` + `SENDER_PASSWORD` Gmail — **[À CORRIGER]** à migrer vers env file.
+
+### 6.4 Sources de données externes utilisées
+
+| Source | Usage | Fréquence |
+|---|---|---|
+| Yahoo Finance (`yfinance`) | DXY (`DX-Y.NYB`), ^TNX, VIX, Gold | 5 min / 15 min / 30 s |
+| FRED API | TIPS yield, DFII10, Fed funds, yield curve 10Y2Y | 5 min |
+| CFTC COT (Legacy Futures Only) | Positionnement institutionnel Gold | Hebdo |
+| ForexFactory RSS | Calendar news Haute/Moyenne impact | 2 min |
+| alternative.me | Fear & Greed Index | 5 min |
+| Anthropic API | Claude Decision Engine (désactivé) | Paramétré (max 1 appel/30 s) |
+| webhook.site (`692ce9b5-…`) | Notifications automation cycle | 15 min |
+
+### 6.5 Rate limits / TTL configurés
+
+```python
+"ttl": {
+    "gold_price":   30,
+    "macro":        300,
+    "cot":          3600,
+    "news":         120,
+    "sentiment":    300,
+    "geopolitics":  600,
+    "signal":        30,
+},
+"health_grace_s": 20,
+```
+
+---
+
+## 7 — Backups et versioning
+
+### 7.1 Repo Git — `Mickael-Creator/XAUUSD---MT5`
+
+| Élément | Valeur |
+|---|---|
+| Remote | `https://github.com/Mickael-Creator/XAUUSD---MT5.git` |
+| Branche active locale | `main` |
+| Branches distantes | `main`, `claude/analyze-sell-trade-issue-nz5wD`, `claude/setup-gold-ml-system-GnRPn` |
+| Worktree | `/home/traderadmin/` (monté comme repo root) |
+| Synchronisation | `main` et `origin/main` sont alignés (aucun ahead/behind au snapshot) |
+
+> ⚠️ **[À CORRIGER D'URGENCE]** — Le remote Git contient un **token GitHub en clair** dans son URL (`ghp_...`). Tout `git remote -v` l'expose. À régénérer côté GitHub (révoquer) et reconfigurer avec un credential helper ou en clean URL.
+
+### 7.2 Derniers commits (20 derniers)
+
+```
+bbe9116 fix: log pullback après RefreshM5Data + throttle log 100->10
+e618456 fix: throttle statics function-scope + swing lookback 24->80
+2ccf7a7 fix: throttle direction only + reset TimeGMT vérifié
+89f4be6 fix: Max Bars After BOS 12 -> 60 (15h)
+3971b80 fix: throttle anti-répétition 30s→300s (1 bougie M5)
+86351ba fix: SL points->pips + lot calc pipValue correct + garantie minLot
+c427afc fix: anti-rep skip AVANT analyse + pullback OTE fallback + lookback M5 deja 80
+0f45a30 fix: Max SL 45 -> 55 pips + anti-repetition OnTick + logs post-BOS pullback score
+9476aee fix: desactiver Range Filter ATR — redondant avec pipeline ICT Sweep+BOS+CHoCH
+981629c fix: P1 CHoCH 3 bougies + P2 tolerance FVG/OB 0.1xATR + P3 BOS scan +10 + MaxBarsAfterSweep 60 + MarkLevelSwept integre dans pipeline
+ea57b4d fix: MarkLevelSwept post-trade (anti double-signal sur meme niveau ICT)
+977d59a feat: logs diagnostic strategie A/B/C/D/E + audit coherence C1-C5 valide
+0c09ba9 fix: scan 96 bougies (24h) + EQL réactivé + Asian Range ATR dynamique + Max_Spread défaut 7.0 pips FTMO + Session défaut 00:00-21:00 GMT
+ff19188 fix: P4b lotStep alignement apres Phase_Test_Force_Lot override
+38f5be6 fix: P4 re-clamp lots au minLot broker apres override Phase_Test
+517d687 fix: P1 sizeFactor MIN au lieu de cumul + P2 validation blackout PM:591 + P3 détection mode HEDGE FTMO
+1471867 feat: Allow bidirectional trading — pipeline ICT détermine direction, VPS = confidence+timing only
+83da47d fix: B1 lot input Phase_Test + B2 confidence LOCAL/LONDON + B3 POST_NEWS sizeFactor + M1 reclaimBar>=1 + M2 refresh 07/12h GMT + M3 reset jour TimeGMT
+52697ba fix: desactiver EqualHL temporaire + cap absolu 10 niveaux
+59b7dab fix: Equal H/L strict max 3 chaque + cap global 20 niveaux
+```
+
+Aucun tag de version actif dans le repo au snapshot (`git tag -l` est vide).
+
+### 7.3 Stratégie de backup existante
+
+| Mécanisme | Fréquence | Source | Destination |
+|---|---|---|---|
+| Cron `0 4 * * *` | Daily 04:00 | `/root/gold_ml_phases/*.db` (⚠️ chemin probablement mort) | `/root/backups/YYYYMMDD/` |
+| Rotation logs cron | Weekly Dim 03:00 | `/root/gold_ml_phases/logs/*.log` (> 7 jours) | Supprimés |
+| Rotation logs cron | Weekly Dim 03:00 | `/var/log/*.log` (> 100 MB) | Supprimés |
+| `RotatingFileHandler` calendar_monitor | À chaud (10 MB, 5 backups) | `calendar_monitor.log` | `.log.1` à `.log.5` |
+| `WatchedFileHandler` gold_intelligence | À chaud | `/root/gold_ml_phase4/logs/gold_intelligence.log*` | 20+ fichiers gz |
+| `.before_restore` EA | Manuel | `Gold_News_Institutional_EA.mq5` | `.before_restore` dans `/home/traderadmin/` |
+| `.backup`, `.bak_*`, `.save` Python | Manuel | Plusieurs scripts | Dans `/root/gold_ml_phase4/` |
+
+Dossiers de backup historique :
+
+- `/root/backups/` — 109 sous-dossiers `YYYYMMDD` depuis 2026-01-08, total **1.3 MB**
+- `/root/gold_ml_phase4/archive_obsolete/` + `/archives/` + `/_archive_old/` — code legacy
+- `/root/gold_ml_phase4/logs/archives_YYYYMM/` — logs archivés mensuel
+
+---
+
+## 8 — Problèmes connus et TODO technique
+
+### 8.1 Bugs identifiés mais pas encore corrigés
+
+| Sévérité | Problème | Localisation | Note |
+|---|---|---|---|
+| 🟥 Critique | Token GitHub exposé dans `git remote -v` | `/home/traderadmin/.git/config` | À régénérer + cleanup |
+| 🟥 Critique | `API_KEY` + mot de passe Gmail en dur dans `vps-api-secured/server.py` | `/opt/vps-api/server.py` | À migrer vers env file |
+| 🟧 Élevé | Crons référencent `/root/gold_ml_phases/` (inexistant) | crontab `root` | 5+ tâches probablement mortes (data collector 30 min, ML optimization 2h, daily check, backup DBs, log rotation) |
+| 🟧 Élevé | `gold_intelligence.db` fait **611 MB** | `/root/gold_ml_phase4/` | Pas de VACUUM/compaction — va grossir indéfiniment |
+| 🟨 Modéré | Webhook automation pointe vers webhook.site (endpoint de test) | `automation_bridge.py:15` | Log : `⚠️ Webhook error (ignored): 404` |
+| 🟨 Modéré | Unit `gold_intelligence.service` déclare `User=goldml` mais process tourne en `root` | `/etc/systemd/system/gold_intelligence.service` | Inconsistance à résoudre |
+| 🟨 Modéré | `calendar_monitor.py` contient `CALENDAR_API_KEY = 'votre_cle_api_si_necessaire'` | ligne 43 | Placeholder jamais complété |
+| 🟩 Mineur | 3 variantes `3_prepare_ml_dataset*.py` cohabitent | `/root/gold_ml_phase4/` | Nettoyer |
+| 🟩 Mineur | `claude_decision_engine.py` toujours présent mais désactivé dans `gold_intelligence.py:29` | — | Retirer ou réactiver selon décision |
+
+### 8.2 Limitations actuelles
+
+- **Pas de HTTPS** : toutes les API (5000/5001/5002) sont en HTTP clair — tokens Bearer circulent en clair sur Internet.
+- **Pas de reverse proxy** : nginx n'est pas installé malgré la présence de `nginx_goldml.conf`.
+- **Pas de monitoring externe** : pas de Grafana / Prometheus / Sentry — tout repose sur les logs locaux + cron alert shell.
+- **Pas de CI/CD** : pas de workflow GitHub Actions visible dans le repo.
+- **Pas de tests automatiques** : présence de `test_*.py` mais exécution manuelle uniquement.
+- **Pas de tag de version** Git — traçabilité reposant sur les hashes de commits.
+- **Legacy multi-versions** : beaucoup de fichiers `.backup`, `.bak_*`, `.before_restore`, `.save`, `.PROD_OK_*` qui alourdissent l'arborescence.
+
+### 8.3 Technical debt
+
+1. Deux chemins applicatifs coexistent : `/root/gold_ml_phase4/` (actif) vs `/root/gold_ml_phases/` (référencé dans cron, inexistant).
+2. Deux venvs Python séparés (`venv/` et `ml_venv/`) avec des versions divergentes de `pandas` (2.3.2 vs 2.3.3).
+3. Pas de gestion dépendances en `requirements.txt` — `pip freeze` brut.
+4. Plusieurs modules Python désactivés mais conservés (`python_sniper.py`, `claude_decision_engine.py`).
+5. Plusieurs scripts `cot_*` redondants (`cot_fetcher.py`, `cot_advanced_fetcher.py`, `cot_endpoint.py`, `cot_service.py`).
+6. `backend_api.py` définit des routes mais n'est plus exposé par aucun service actif.
+7. Pas de schéma DB documenté — SQLite accédé ad-hoc.
+
+### 8.4 Tâches en attente (inférées des commentaires code)
+
+- **Phase 1 Liquidité ICT** (approche A) : niveaux ICT calculés (`CLiquidityLevels`) mais **pas encore branchés dans le sweep principal** (commentaire `GoldML_LiquidityLevels.mqh:15`).
+- **Phase 2** : réécriture du sweep pour consommer les niveaux ICT — en attente.
+- Normaliser unit systemd pour forcer `User=goldml`.
+- Migration `claude_decision_engine` : décision retrait définitif ou réactivation.
+
+---
+
+## 9 — Monitoring et observabilité
+
+### 9.1 Logs applicatifs
+
+| Source | Chemin | Taille au snapshot | Rotation |
+|---|---|---|---|
+| `gold_intelligence` (Flask 5002) | `/root/gold_ml_phase4/logs/gold_intelligence.log` | 564 kB (courant) + 20+ archives `.gz` | `WatchedFileHandler` + cron hebdo |
+| `calendar_monitor` (gunicorn 5000) | `/root/gold_ml_phase4/calendar_monitor.log` | — | `RotatingFileHandler` (10 MB × 5) |
+| `automation_bridge` | systemd journal | — | `journalctl` natif |
+| `dxy_fetcher` | systemd journal + `dxy_fetcher.log` racine `/root/` | 2.4 MB | — |
+| `data_collector` | `/root/gold_ml_phase4/logs/data_collector.log` + archives `.gz` | 16 kB (courant) | Hebdo cron |
+| `vps-api-secured` | `/var/log/vps-api-secured.log` + systemd journal | — | — |
+| Logs EA (côté VPS Windows) | [À CLARIFIER AVEC MICKAËL] — probablement MT5 `Experts/` | — | — |
+| `bridge.log`, `bridge_service_error.log.1` | `/root/gold_ml_phase4/logs/` | — | — |
+| `20260420_filtered.log` | `/home/traderadmin/` | **43 MB** | — |
+
+### 9.2 Rotation et cleanup
+
+- Cron hebdo (Dim 03:00) supprime logs > 7 jours dans `/root/gold_ml_phases/logs/` (⚠️ chemin inexistant) et logs > 100 MB dans `/var/log/`.
+- `RotatingFileHandler` pour `calendar_monitor.py` : `maxBytes=10 MB`, `backupCount=5`.
+- `WatchedFileHandler` pour `gold_intelligence.py` : pas de rotation interne, dépend du cron.
+
+### 9.3 Alertes configurées
+
+| Type | Déclencheur | Destination |
+|---|---|---|
+| Alerte disque > 80 % | Cron 09:00 quotidien | `/var/log/disk_alerts.log` |
+| Auto-restart `gold-ml-monitor` | Cron */10 min si service down | `/var/log/auto-restart.log` |
+| Alert monitor `goldml` | Cron */2 min (`goldml_alert_monitor.sh`) | [À CLARIFIER] contenu du script |
+| Alerte email (`vps-api-secured`) | Déclenché par code Flask | Destinataire `ls.mickaell@gmail.com` (via Gmail SMTP) |
+| Webhook automation | Cycle 15 min (auto) | `webhook.site/692ce9b5-…` (test endpoint, retourne 404) |
+
+### 9.4 Dashboards de supervision
+
+Aucun dashboard de supervision externe détecté au snapshot (ni Grafana, ni Kibana, ni Datadog, ni Prometheus).
+Le "dashboard" évoqué dans l'EA (`Enable_Dashboard = true`) est un affichage graphique **sur le chart MT5 uniquement** (Objects MQL5), pas un outil web.
+
+---
+
+## Appendices
+
+### A — Mapping des composants par rôle
+
+| Rôle fonctionnel | Composant principal | Port | Statut |
+|---|---|---|---|
+| Signal temps réel pour EA | `gold_intelligence.py` | 5002 | RUNNING |
+| Agrégation macro/calendar | `calendar_monitor.py` | 5000 | RUNNING |
+| Fetch DXY/TNX | `dxy_fetcher.py` | — | RUNNING |
+| Cycle automation macro | `automation_bridge.py` | — | RUNNING |
+| API legacy | `vps-api-secured/server.py` | 5001 | RUNNING (mais répond 404 par défaut) |
+| Détection ICT (BOS/CHoCH/FVG/OB) | `GoldML_ICT_Detector.mqh` | — | EA local |
+| Niveaux de liquidité (PDH/PDL/EQL/…) | `GoldML_LiquidityLevels.mqh` | — | EA local (Phase 1) |
+| Scoring sniper (0-100) | `GoldML_SniperEntry_M15.mqh` | — | EA local |
+| Filtres qualité + DEAL v2 | `GoldML_QualityFilters.mqh` | — | EA local |
+| Gestion positions | `GoldML_PositionManager_V2.mqh` | — | EA local |
+| Parser JSON robuste | `GoldML_JsonParser.mqh` | — | EA local |
+
+### B — Checklist « ce qui est à clarifier avec Mickaël »
+
+- [ ] Chemin `/root/gold_ml_phases/` référencé dans cron : existe-t-il sur un autre mount/VPS ou crons morts ?
+- [ ] Version exacte MT5 utilisée (build + broker FTMO).
+- [ ] Statut de `vps-api-secured` port 5001 : encore consommé ou à décommissionner ?
+- [ ] Statut de `backend_api.py` et des 3 services systemd `DISABLED` (`goldml-api`, `goldml-bridge`, `goldml-calendar-api`) : peut-on les supprimer ?
+- [ ] Contenu / finalité de `goldml_alert_monitor.sh`.
+- [ ] Webhook.site : endpoint de test volontaire ou à remplacer par Discord/Slack ?
+- [ ] MT5 `Experts/` logs : accessibles depuis le VPS Windows ?
+- [ ] `/home/traderadmin/20260420_filtered.log` (43 MB) : log de debug à archiver ou supprimer ?
+- [ ] Unit `gold_intelligence.service` : utilisateur `goldml` volontaire ou bug (process tourne en root) ?
+- [ ] Claude Decision Engine : retirer définitivement ou réactiver sous conditions ?
+
+### C — Informations de connexion
+
+- **VPS Linux** : `86.48.5.126` (hostname `vmi2828096`)
+- **Ports publics** : 22 (SSH), 5000 (calendar), 5001 (legacy), 5002 (signal engine)
+- **VPS Windows** : [À CLARIFIER — non observable depuis ce VPS]
+- **Repo GitHub** : `https://github.com/Mickael-Creator/XAUUSD---MT5`
+
+---
+
+*Document généré automatiquement — 2026-04-22. Aucun fichier du système n'a été modifié lors de sa production.*
