@@ -433,7 +433,7 @@ int OnInit() {
    // Recapitulatif config pour debug rapide
    //================================================================
    Print("== GOLD INSTITUTIONAL EA - CONFIG ==");
-   Print("  Version: v2.1 | Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
+   Print("  Version: v2.2 | Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
    Print("  Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
          " | Equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
    Print("  Session: ", Session_Start, " - ", Session_End, " GMT");

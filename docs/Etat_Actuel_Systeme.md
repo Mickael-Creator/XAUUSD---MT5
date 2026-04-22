@@ -3,6 +3,8 @@
 > **Photographie de référence** — générée le **2026-04-22** depuis le VPS Linux `86.48.5.126` (vmi2828096).
 > À n'utiliser que comme inventaire de départ pour la plateforme d'analyse quantitative.
 > Ne modifie rien dans le code existant.
+>
+> **MAJ 2026-04-22 — v2.2 (EA Print label)** — intégration des garde-fous P2 (veto H4 structurel), P3 (DEAL-v2 reject threshold configurable) et des alertes SELL observationnelles. Voir [§4.9](#49--garde-fous-p2p3--alertes-sell-opportunity-ea-v22--2026-04-22).
 
 ---
 
@@ -436,7 +438,9 @@ Implémenté dans `CQualityFilters::GetH4ScoreContribution()` — `GoldML_Qualit
 | `CONTRA-STRONG` | 60-70 % | −20 | 0.35 | `H4 BEARISH (LH+LL) + API 60-70% -> -20 \| size 35%` |
 | `CONTRA-STRONG` | < 60 % | −25 | **0.00 (BLOCKED)** | `H4 BEARISH (LH+LL) + API<60% -> -25 \| BLOCKED` |
 
-**Règle de blocage unique** : `h4Score ≤ −25` (autrement dit : H4 contre-tendance avec API confidence < 60 %).
+**Règle de blocage historique** : `h4Score ≤ −25` (autrement dit : H4 contre-tendance avec API confidence < 60 %).
+
+> **MAJ v2.2 (2026-04-22)** — le seuil est désormais configurable via l'input `DEAL_Reject_Threshold` (défaut **-20**, voir [§4.9](#49--garde-fous-p2p3--alertes-sell-opportunity-ea-v22--2026-04-22)) et un veto structurel H4 (`Enable_H4_Hard_Veto`, P2) s'exécute **avant** ce check. Avec défaut -20, la ligne `CONTRA-STRONG + API 60-70 %` (score -20) est désormais **bloquée** en plus des deux lignes `-25` historiques.
 
 **Exception POST_NEWS_ENTRY** : fade trade par design → `trendOK = true` forcé, `m_h4SizeFactor = 1.0` réinitialisé (fix B3 2026-04-14).
 
@@ -449,6 +453,66 @@ Implémenté dans `CQualityFilters::GetH4ScoreContribution()` — `GoldML_Qualit
 | `Min_Confidence` | 60.0 | Confidence minimum pour trader (mode API) |
 | `Local_Min_Confidence` | 55.0 | Fallback local quand l'API est silencieuse |
 
+### 4.9 Garde-fous P2/P3 + Alertes SELL opportunity (EA v2.2 — 2026-04-22)
+
+Trois couches additionnelles au-dessus du scoring DEAL v2 (§4.7), déployées le **2026-04-22** en réponse au biais BUY-only observé architecturalement (VPS → 0 SELL, Sniper → 0 HIGH sweep, DEAL-v2 → 0 reject sur la fenêtre d'observation pré-2026-04-22).
+
+#### P2 — Veto structurel H4 (input `Enable_H4_Hard_Veto`, défaut `true`)
+
+- **Fichier** : `GoldML_QualityFilters.mqh:767-774`
+- S'exécute **avant** le calcul du `h4Score` — indépendant du scoring DEAL :
+  - Bloque **BUY** si H4 confirmé BEARISH (Lower High **ET** Lower Low sur les 3 derniers swings H4)
+  - Bloque **SELL** si H4 confirmé BULLISH (Higher High **ET** Higher Low)
+- **Ne bloque pas** : `CONTRA-LIGHT` (1 seul critère cassé), `RANGING`, `ALIGNED`.
+- **Rollback** : `Enable_H4_Hard_Veto = false` → comportement pré-P2 (DEAL-v2 seul).
+- **Log émis** : `[H4-VETO] <DIR> bloque: H4 contre-structure forte (<BEARISH LH+LL|BULLISH HH+HL>) | score calcule=<h4Score> ignore (veto structurel independant du score DEAL)`
+- **Tag motif** exposé à `CheckEntry` via `CQualityFilters::GetLastH4BlockReason()` = `"H4-VETO"` (réinitialisé à chaque évaluation).
+
+#### P3 — DEAL-v2 reject threshold (input `DEAL_Reject_Threshold`, défaut `-20`)
+
+- **Fichier** : `GoldML_QualityFilters.mqh:781-787`
+- Remplace le seuil hardcodé `h4Score ≤ -25` (§4.7) par un input `int` configurable.
+- **Défaut -20** bloque désormais aussi le cas `CONTRA-STRONG + API 60-70 %` (score -20). Les cas `-25` historiques (CONTRA-LIGHT + API<60 % et CONTRA-STRONG + API<60 %) restent bloqués.
+- Scores `-5`, `-10`, `-15` conservent leur comportement de modulation via `sizeFactor` (ne bloquent pas à -20).
+- **Rollback safety** : `DEAL_Reject_Threshold = -99` → seuil inaccessible, tous passent.
+- **Interaction P2 → P3** : P2 retourne **avant** P3. Si veto structurel déclenché, ce seuil n'est pas évalué (comportement attendu).
+- **Log émis** : `[DEAL-v2-REJECT] score=<h4Score> <= threshold=<threshold> | direction=<DIR> | sizeFactor=<X.XX> ignore, trade bloque`
+- **Tag motif** exposé : `GetLastH4BlockReason() = "DEAL-v2-REJECT"`.
+
+#### Alertes SELL opportunity (inputs `Enable_SellOpportunity_Alerts` + 2 sub-inputs)
+
+- **Fichiers** :
+  - Évaluateur : `Gold_News_Institutional_EA.mq5:1086-1122` (`EvaluateSellOpportunity`)
+  - Hook dans `CheckEntry` : `Gold_News_Institutional_EA.mq5:1286-1291`
+- **Condition de déclenchement** (dans `CheckEntry`, après `CQualityFilters::CheckAllFilters`) :
+  ```
+  Enable_SellOpportunity_Alerts
+    && direction == "BUY"
+    && !fr.trendOK
+    && (GetLastH4BlockReason() == "H4-VETO" || "DEAL-v2-REJECT")
+  ```
+- **Logique interne** : appelle `GetLocalSignal()` (H4 + EMA) et vérifie si un setup SELL ≥ `Local_Min_Confidence` (55 %) serait détecté à cet instant.
+  - Si **oui** → log `[SELL-OPPORTUNITY] ...` + `SendNotification()` push MT5 mobile (sauf si `SellAlert_Logs_Only = true`).
+  - Si **non** → log `[SELL-SKIPPED] ...`.
+- **AUCUN trade automatique** — pure observation destinée à collecter de la data sur la pertinence SELL en régime macro BEARISH persistant (fenêtre d'observation prévue **5-7 jours** à partir du déploiement v2.2).
+- **Throttle interne** : **1 h hardcodé** (`static datetime lastEvalTime` dans `EvaluateSellOpportunity`). H4 bar = 4 h mais 1 h laisse une fenêtre d'observation plus fine sans noyer le mobile sur un régime macro qui peut durer des jours. Le throttle s'applique **à la fois** à `[SELL-OPPORTUNITY]` et `[SELL-SKIPPED]` (le return early est avant la branche log).
+- **Master switch rollback** : `Enable_SellOpportunity_Alerts = false` → aucun appel à `EvaluateSellOpportunity` depuis `CheckEntry`, comportement EA strictement identique au comportement pré-alertes.
+- **Sous-inputs** :
+  - `SellAlert_Push_Notification` (défaut `true`) — active `SendNotification()` natif MT5 mobile.
+  - `SellAlert_Logs_Only` (défaut `false`) — si `true`, n'émet **que** les logs (utile pour silencieux en test).
+
+#### Nouveaux tags de logs (Journal EA MT5, à consulter sur VPS Windows)
+
+| Tag | Émis par | Fréquence attendue | Sémantique |
+|---|---|---|---|
+| `[H4-VETO]` | `GoldML_QualityFilters.mqh:769` | À chaque tentative bloquée par P2 | Veto structurel — signal rejeté **avant** scoring DEAL |
+| `[DEAL-v2-REJECT]` | `GoldML_QualityFilters.mqh:782` | À chaque tentative bloquée par P3 | Seuil `DEAL_Reject_Threshold` atteint — rejeté **après** scoring DEAL |
+| `[SELL-OPPORTUNITY]` | `Gold_News_Institutional_EA.mq5:1111` (+ `1115` si `SendNotification` échoue) | Max **1/h** | BUY bloqué + LOCAL détecte SELL ≥ 55 % — **push mobile émis** |
+| `[SELL-SKIPPED]` | `Gold_News_Institutional_EA.mq5:1118` | Max **1/h** | BUY bloqué mais LOCAL ne voit pas de setup SELL (dir / conf reportés) |
+| `[DEAL-v2]` | `GoldML_QualityFilters.mqh:789` | À chaque passage autorisé | (Existant avant v2.2) Score calculé, passage autorisé |
+
+> **Note :** le dry-run grep de ces 4 nouveaux tags sur les logs EA disponibles avant compilation v2.2 (`/home/traderadmin/logs_diag_2026-04/*.log` + `20260420_filtered.log`) retourne **0 occurrences** — cohérent avec le fait que le code n'a pas encore été compilé côté VPS Windows au jour de cette mise à jour doc.
+
 ---
 
 ## 5 — Inventaire EA MQL5
@@ -459,10 +523,10 @@ Fichiers trackés git :
 
 | Fichier | Lignes | Rôle | Dernière modif |
 |---|---|---|---|
-| `Gold_News_Institutional_EA.mq5` | **2142** | Point d'entrée EA (OnInit/OnTick/OnTrade), magic `888892`, version `2.10` | 2026-04-17 18:24 |
+| `Gold_News_Institutional_EA.mq5` | **2235** | Point d'entrée EA (OnInit/OnTick/OnTrade), magic `888892`, `#property version "2.10"`, Print label `v2.2` (MAJ 2026-04-22) | 2026-04-22 |
 | `GoldML_SniperEntry_M15.mqh` | **1874** | `CSniperM15` — détection sweep/BOS/CHoCH/pullback, scoring 0-100 | 2026-04-17 18:24 |
 | `GoldML_PositionManager_V2.mqh` | 901 | `CPositionManagerV2` — partial TP, BE, trailing ATR | 2026-04-15 20:05 |
-| `GoldML_QualityFilters.mqh` | 948 | `CQualityFilters` — cooldown, daily limit, range filter, **DEAL v2 H4** | 2026-04-17 13:35 |
+| `GoldML_QualityFilters.mqh` | **1018** | `CQualityFilters` — cooldown, daily limit, range filter, **DEAL v2 H4**, **P2 veto H4 hard** + **P3 DEAL-v2 reject threshold** (MAJ 2026-04-22) | 2026-04-22 |
 | `GoldML_ICT_Detector.mqh` | 527 | `CICT_Detector` — primitives CHoCH/BOS/FVG/OB, `DetectShiftM5` | 2026-04-17 14:07 |
 | `GoldML_LiquidityLevels.mqh` | 515 | `CLiquidityLevels` — PDH/PDL, PWH/PWL, session, EQL, `MarkLevelSwept` | 2026-04-17 13:57 |
 | `GoldML_JsonParser.mqh` | 221 | Parser JSON robuste (fix AUDIT-C1) | 2026-03-27 14:44 |
@@ -559,6 +623,15 @@ Local_Max_Daily_Trades = 3
 Enable_ICT_Liquidity   = true        (Phase 1)
 Enable_Dashboard       = true
 Enable_Alerts          = true
+```
+
+#### Garde-fous P2/P3 + Alertes SELL (EA v2.2 — 2026-04-22, voir §4.9)
+```
+Enable_H4_Hard_Veto            = true    (P2 : veto H4 structurel BEARISH LH+LL / BULLISH HH+HL)
+DEAL_Reject_Threshold          = -20     (P3 : seuil configurable, remplace hardcode -25 ; -99 = rollback safety)
+Enable_SellOpportunity_Alerts  = true    (Master switch : false = rollback total au comportement pré-alertes)
+SellAlert_Push_Notification    = true    (SendNotification() push MT5 mobile natif)
+SellAlert_Logs_Only            = false   (true = logs only, pas de push)
 ```
 
 ### 5.3 Projet secondaire : `Turtle` (FTMO 100K, indépendant)
@@ -740,6 +813,7 @@ Dossiers de backup historique :
 - **Pas de tests automatiques** : présence de `test_*.py` mais exécution manuelle uniquement.
 - **Pas de tag de version** Git — traçabilité reposant sur les hashes de commits.
 - **Legacy multi-versions** : beaucoup de fichiers `.backup`, `.bak_*`, `.before_restore`, `.save`, `.PROD_OK_*` qui alourdissent l'arborescence.
+- **Biais BUY-only architectural** (observé pré-2026-04-22) : sur la fenêtre d'observation disponible avant cette MAJ, le VPS a émis **0 SELL**, le Sniper a détecté **0 HIGH sweep**, et le filtre DEAL-v2 n'a produit **0 reject**. Le système était donc structurellement incapable de prendre un SELL. **Partiellement contenu depuis 2026-04-22** par P2 (veto H4 structurel, bloque BUY sur H4 BEARISH LH+LL) + P3 (seuil DEAL-v2 configurable à -20, capture `CONTRA-STRONG + API 60-70 %`) — voir [§4.9](#49--garde-fous-p2p3--alertes-sell-opportunity-ea-v22--2026-04-22). Les alertes `[SELL-OPPORTUNITY]` permettent d'**observer** les SELL setups sans intervenir. **Décision finale pendante** après 5-7 jours de collecte data pour trancher sur une bascule éventuelle (réactivation SELL côté VPS, review Sniper, ajustement seuils).
 
 ### 8.3 Technical debt
 
