@@ -189,17 +189,32 @@ input int    DEAL_Reject_Threshold = -20;
 
 //+------------------------------------------------------------------+
 //| SELL OPPORTUNITY ALERTS (PR serie 3 — 2026-04-22)                |
+//| Sniper-gated mode ajoute le 2026-04-23                            |
 //+------------------------------------------------------------------+
 // Quand un BUY est bloque par P2 (veto H4) ou P3 (reject DEAL-v2),
-// evalue si le mode LOCAL (H4 + EMA) detecterait un setup SELL a cet
-// instant. Si oui -> log [SELL-OPPORTUNITY] + push notification optionnel.
-// Sinon -> log [SELL-SKIPPED]. AUCUN trade automatique : pure observation.
-// Throttle interne 1h (hardcode) pour eviter le spam mobile sur regime
-// macro persistant (H4 BEARISH peut durer des jours).
+// evalue si le pipeline SELL detecterait un setup a cet instant.
+// Si oui -> log + push notification optionnel. AUCUN trade automatique.
+// Throttle interne 1h (hardcode) pour eviter le spam mobile.
+//
+// DEUX MODES :
+//  - Legacy (SellAlert_Require_Sniper=false) : check LOCAL (H4+EMA) seul.
+//    C est le comportement de la PR #4 (22/04). Constat sur 12 alertes du
+//    23/04 : ~85% etaient des signaux directionnels retardes, pas des
+//    setups ICT tradeables.
+//  - Sniper-gated (SellAlert_Require_Sniper=true, defaut) : on exige en plus
+//    un setup Sniper M15 complet (sweep HIGH + BOS bearish + FVG/OB + score
+//    >= seuil) pour declencher l alerte. Rend les alertes "ICT-grade".
 input group "=== SELL OPPORTUNITY ALERTS ==="
 input bool   Enable_SellOpportunity_Alerts = true;    // Master switch
 input bool   SellAlert_Push_Notification   = true;    // Push MT5 mobile natif
 input bool   SellAlert_Logs_Only           = false;   // Si true: pas de push, juste logs
+// PR feat/sniper-gated-sell-alerts (2026-04-23):
+// true  = alertes ICT-grade (Sniper M15 doit valider le setup)
+// false = comportement legacy PR #4 (LOCAL seul)
+input bool   SellAlert_Require_Sniper      = true;
+// Score Sniper minimum pour declencher l alerte (aligne sur Sniper_Min_Score
+// par defaut). Monter a 75-80 si encore trop bruyant apres observation.
+input int    SellAlert_Sniper_Min_Score    = 70;
 
 //+------------------------------------------------------------------+
 //| ICT LIQUIDITY (PHASE 1 APPROCHE A)                                |
@@ -433,7 +448,7 @@ int OnInit() {
    // Recapitulatif config pour debug rapide
    //================================================================
    Print("== GOLD INSTITUTIONAL EA - CONFIG ==");
-   Print("  Version: v2.2 | Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
+   Print("  Version: v2.3 | Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
    Print("  Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
          " | Equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
    Print("  Session: ", Session_Start, " - ", Session_End, " GMT");
@@ -1084,9 +1099,15 @@ LocalSignal GetLocalSignal() {
 
 //+------------------------------------------------------------------+
 //| EVALUATE SELL OPPORTUNITY (PR serie 3 — 2026-04-22)              |
+//| Sniper-gated refactor : 2026-04-23                                |
 //| Appele uniquement quand un BUY vient d etre bloque par P2 ou P3. |
-//| Check si LOCAL (H4+EMA) detecterait un setup SELL a cet instant. |
 //| AUCUN trade automatique : pure observation + notification.        |
+//|                                                                   |
+//| Pipeline :                                                        |
+//|   1. Filtre directionnel LOCAL (H4 + EMA + confidence)            |
+//|   2. Si SellAlert_Require_Sniper=true : Sniper M15 ValidateSetup  |
+//|      doit retourner un setup ICT complet avec score >= seuil      |
+//|   3. Alerte enrichie (sweep / BOS / FVG / score)                  |
 //+------------------------------------------------------------------+
 void EvaluateSellOpportunity(string buyBlockReason, double currentPrice) {
    // Throttle interne : 1 eval par heure max (H4 bar = 4h, mais 1h laisse
@@ -1096,28 +1117,73 @@ void EvaluateSellOpportunity(string buyBlockReason, double currentPrice) {
    if(now - lastEvalTime < 3600) return;
    lastEvalTime = now;
 
-   // Evaluer LOCAL sans polluer l arbitrage signal principal
+   // Etape 1 : filtre directionnel LOCAL (inchange vs PR #4)
    LocalSignal local = GetLocalSignal();
 
    string h4State = (g_filters != NULL && g_filters.IsLastH4HardCounter())
                     ? "BEARISH_LH_LL"
                     : "CONTRA_LIGHT_OR_RANGING";
 
-   if(local.direction == "SELL" && local.confidence >= Local_Min_Confidence) {
+   if(local.direction != "SELL" || local.confidence < Local_Min_Confidence) {
+      Print("[SELL-SKIPPED-LOW-CONF] BUY bloque ", buyBlockReason,
+            " | LOCAL dir=", local.direction,
+            " conf=", (int)local.confidence,
+            "% seuil=", (int)Local_Min_Confidence, "%");
+      return;
+   }
+
+   // Mode legacy : LOCAL suffit (rollback PR #4)
+   if(!SellAlert_Require_Sniper) {
       string msg = StringFormat(
          "[SELL SETUP] BUY bloque %s | LOCAL signal SELL @ %.2f | H4 %s | conf %d%% | Decide manuellement",
          buyBlockReason, currentPrice, h4State, (int)local.confidence);
-
       Print("[SELL-OPPORTUNITY] ", msg);
-
       if(SellAlert_Push_Notification && !SellAlert_Logs_Only) {
          if(!SendNotification(msg))
             Print("[SELL-OPPORTUNITY] WARNING: SendNotification failed (MT5 mobile configure ?)");
       }
-   } else {
-      Print("[SELL-SKIPPED] BUY bloque ", buyBlockReason,
-            " mais LOCAL ne detecte pas de setup SELL (dir=", local.direction,
-            ", conf=", (int)local.confidence, "%, seuil=", (int)Local_Min_Confidence, "%)");
+      return;
+   }
+
+   // Etape 2 : Sniper-gated — exige un setup ICT complet
+   if(g_sniper == NULL) {
+      Print("[SELL-SKIPPED-NO-SNIPER] g_sniper NULL — pas de validation ICT possible");
+      return;
+   }
+
+   SniperResultM15 snipe = g_sniper.ValidateSetup("SELL");
+
+   if(!snipe.isValid || snipe.score < SellAlert_Sniper_Min_Score) {
+      Print("[SELL-SKIPPED-NO-SNIPER] BUY bloque ", buyBlockReason,
+            " | LOCAL SELL OK @ ", DoubleToString(currentPrice, 2),
+            " mais Sniper M15 rejette : ", snipe.reason,
+            " | sweep=", (snipe.sweep.detected ? snipe.sweep.sweepType : "NONE"),
+            " bos=", (snipe.bos.detected ? snipe.bos.direction : "NONE"),
+            " score=", snipe.score, "/", SellAlert_Sniper_Min_Score);
+      return;
+   }
+
+   // Etape 3 : setup complet — alerte enrichie
+   string sweepDesc = snipe.sweep.detected
+      ? StringFormat("%s @ %.2f", snipe.sweep.sweepType, snipe.sweep.sweepLevel)
+      : "NONE";
+   string bosDesc = snipe.bos.detected
+      ? StringFormat("%s @ %.2f", snipe.bos.direction, snipe.bos.bosLevel)
+      : "NONE";
+   string fvgDesc = (snipe.pullback.pdType != "NONE" && snipe.pullback.pdType != "")
+      ? StringFormat("%s %.2f-%.2f", snipe.pullback.pdType,
+                     snipe.pullback.zoneLow, snipe.pullback.zoneHigh)
+      : "NONE";
+
+   string msg = StringFormat(
+      "[SELL-OPPORTUNITY-ICT] Setup complet @ %.2f | Sweep %s | BOS %s | PD %s | Score %d/100 | H4 %s",
+      currentPrice, sweepDesc, bosDesc, fvgDesc, snipe.score, h4State);
+
+   Print("[SELL-OPPORTUNITY-ICT] BUY bloque ", buyBlockReason, " | ", msg);
+
+   if(SellAlert_Push_Notification && !SellAlert_Logs_Only) {
+      if(!SendNotification(msg))
+         Print("[SELL-OPPORTUNITY-ICT] WARNING: SendNotification failed (MT5 mobile configure ?)");
    }
 }
 
