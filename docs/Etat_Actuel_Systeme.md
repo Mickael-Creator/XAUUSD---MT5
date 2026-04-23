@@ -5,6 +5,8 @@
 > Ne modifie rien dans le code existant.
 >
 > **MAJ 2026-04-22 — v2.2 (EA Print label)** — intégration des garde-fous P2 (veto H4 structurel), P3 (DEAL-v2 reject threshold configurable) et des alertes SELL observationnelles. Voir [§4.9](#49--garde-fous-p2p3--alertes-sell-opportunity-ea-v22--2026-04-22).
+>
+> **MAJ 2026-04-23 — v2.3 (EA Print label)** — `EvaluateSellOpportunity` passe en mode **Sniper-gated** : un filtre LOCAL (H4+EMA) déclenche désormais **en plus** une validation Sniper M15 complète (sweep HIGH + BOS bearish + FVG/OB + score ≥ seuil) avant d'émettre une alerte. Motivé par l'analyse des 12 alertes du 23/04 (~85 % de signaux directionnels retardés non tradeables en mode LOCAL seul). Rollback via `SellAlert_Require_Sniper = false`. Voir [§4.9](#49--garde-fous-p2p3--alertes-sell-opportunity-ea-v22--2026-04-22).
 
 ---
 
@@ -479,11 +481,12 @@ Trois couches additionnelles au-dessus du scoring DEAL v2 (§4.7), déployées l
 - **Log émis** : `[DEAL-v2-REJECT] score=<h4Score> <= threshold=<threshold> | direction=<DIR> | sizeFactor=<X.XX> ignore, trade bloque`
 - **Tag motif** exposé : `GetLastH4BlockReason() = "DEAL-v2-REJECT"`.
 
-#### Alertes SELL opportunity (inputs `Enable_SellOpportunity_Alerts` + 2 sub-inputs)
+#### Alertes SELL opportunity (inputs `Enable_SellOpportunity_Alerts` + Sniper gating v2.3)
 
 - **Fichiers** :
-  - Évaluateur : `Gold_News_Institutional_EA.mq5:1086-1122` (`EvaluateSellOpportunity`)
-  - Hook dans `CheckEntry` : `Gold_News_Institutional_EA.mq5:1286-1291`
+  - Évaluateur : `Gold_News_Institutional_EA.mq5::EvaluateSellOpportunity` (refactor 2026-04-23)
+  - Hook dans `CheckEntry` : branche inchangée (direction==BUY && !fr.trendOK && H4-VETO|DEAL-v2-REJECT)
+  - Validation Sniper dry-run : `GoldML_SniperEntry_M15.mqh::CSniperM15::ValidateSetup(direction)` — wrappe `AnalyzeEntry` avec save/restore de `m_lastResult`, confidence=0 (désactive le BOS_DIRECT_BYPASS SETUP-A), timingMode="CLEAR"
 - **Condition de déclenchement** (dans `CheckEntry`, après `CQualityFilters::CheckAllFilters`) :
   ```
   Enable_SellOpportunity_Alerts
@@ -491,27 +494,34 @@ Trois couches additionnelles au-dessus du scoring DEAL v2 (§4.7), déployées l
     && !fr.trendOK
     && (GetLastH4BlockReason() == "H4-VETO" || "DEAL-v2-REJECT")
   ```
-- **Logique interne** : appelle `GetLocalSignal()` (H4 + EMA) et vérifie si un setup SELL ≥ `Local_Min_Confidence` (55 %) serait détecté à cet instant.
-  - Si **oui** → log `[SELL-OPPORTUNITY] ...` + `SendNotification()` push MT5 mobile (sauf si `SellAlert_Logs_Only = true`).
-  - Si **non** → log `[SELL-SKIPPED] ...`.
-- **AUCUN trade automatique** — pure observation destinée à collecter de la data sur la pertinence SELL en régime macro BEARISH persistant (fenêtre d'observation prévue **5-7 jours** à partir du déploiement v2.2).
-- **Throttle interne** : **1 h hardcodé** (`static datetime lastEvalTime` dans `EvaluateSellOpportunity`). H4 bar = 4 h mais 1 h laisse une fenêtre d'observation plus fine sans noyer le mobile sur un régime macro qui peut durer des jours. Le throttle s'applique **à la fois** à `[SELL-OPPORTUNITY]` et `[SELL-SKIPPED]` (le return early est avant la branche log).
+- **Logique interne v2.3 (pipeline deux étages)** :
+  1. **Filtre directionnel LOCAL** : `GetLocalSignal()` doit retourner `direction == "SELL"` et `confidence ≥ Local_Min_Confidence` (55 %). Sinon → log `[SELL-SKIPPED-LOW-CONF]`, return.
+  2. **Si `SellAlert_Require_Sniper = false`** (mode legacy PR #4) → émet `[SELL-OPPORTUNITY]` + push mobile et stop.
+  3. **Si `SellAlert_Require_Sniper = true`** (défaut) → appel `g_sniper.ValidateSetup("SELL")` :
+     - Retour valide && `score ≥ SellAlert_Sniper_Min_Score` (70) → émet `[SELL-OPPORTUNITY-ICT]` avec payload enrichi (sweep HIGH + level, BOS bearish + level, zone PD FVG/OB range, score) + push mobile.
+     - Sinon → log `[SELL-SKIPPED-NO-SNIPER]` avec raison Sniper + détails sweep/BOS/score, pas de push.
+- **AUCUN trade automatique** — pure observation. Les alertes v2.3 ICT-grade préparent par ailleurs l'architecture P4 (mode bidirectionnel AUTO) : si la fiabilité de ces alertes se confirme sur 2-4 semaines d'observation, P4 pourra remplacer `SendNotification()` par `ExecuteTrade()` sans redesign.
+- **Throttle interne** : **1 h hardcodé** (`static datetime lastEvalTime` dans `EvaluateSellOpportunity`). H4 bar = 4 h mais 1 h laisse une fenêtre d'observation plus fine sans noyer le mobile sur un régime macro qui peut durer des jours. Le throttle s'applique à **toutes** les sorties (OPPORTUNITY-ICT, OPPORTUNITY legacy, SKIPPED-NO-SNIPER, SKIPPED-LOW-CONF) — le return early est avant la branche log.
 - **Master switch rollback** : `Enable_SellOpportunity_Alerts = false` → aucun appel à `EvaluateSellOpportunity` depuis `CheckEntry`, comportement EA strictement identique au comportement pré-alertes.
-- **Sous-inputs** :
+- **Inputs** :
   - `SellAlert_Push_Notification` (défaut `true`) — active `SendNotification()` natif MT5 mobile.
   - `SellAlert_Logs_Only` (défaut `false`) — si `true`, n'émet **que** les logs (utile pour silencieux en test).
+  - `SellAlert_Require_Sniper` (défaut `true` — **v2.3**) — `false` rollback comportement legacy PR #4 (LOCAL seul).
+  - `SellAlert_Sniper_Min_Score` (défaut `70` — **v2.3**) — seuil score Sniper M15 pour déclencher l'alerte ICT. Monter à 75-80 si encore bruyant après observation ; descendre à 60-65 si trop restrictif.
 
-#### Nouveaux tags de logs (Journal EA MT5, à consulter sur VPS Windows)
+#### Tags de logs SELL alertes (Journal EA MT5, à consulter sur VPS Windows)
 
 | Tag | Émis par | Fréquence attendue | Sémantique |
 |---|---|---|---|
-| `[H4-VETO]` | `GoldML_QualityFilters.mqh:769` | À chaque tentative bloquée par P2 | Veto structurel — signal rejeté **avant** scoring DEAL |
-| `[DEAL-v2-REJECT]` | `GoldML_QualityFilters.mqh:782` | À chaque tentative bloquée par P3 | Seuil `DEAL_Reject_Threshold` atteint — rejeté **après** scoring DEAL |
-| `[SELL-OPPORTUNITY]` | `Gold_News_Institutional_EA.mq5:1111` (+ `1115` si `SendNotification` échoue) | Max **1/h** | BUY bloqué + LOCAL détecte SELL ≥ 55 % — **push mobile émis** |
-| `[SELL-SKIPPED]` | `Gold_News_Institutional_EA.mq5:1118` | Max **1/h** | BUY bloqué mais LOCAL ne voit pas de setup SELL (dir / conf reportés) |
-| `[DEAL-v2]` | `GoldML_QualityFilters.mqh:789` | À chaque passage autorisé | (Existant avant v2.2) Score calculé, passage autorisé |
+| `[H4-VETO]` | `GoldML_QualityFilters.mqh` | À chaque tentative bloquée par P2 | Veto structurel — signal rejeté **avant** scoring DEAL |
+| `[DEAL-v2-REJECT]` | `GoldML_QualityFilters.mqh` | À chaque tentative bloquée par P3 | Seuil `DEAL_Reject_Threshold` atteint — rejeté **après** scoring DEAL |
+| `[SELL-OPPORTUNITY-ICT]` | `Gold_News_Institutional_EA.mq5::EvaluateSellOpportunity` (v2.3) | Max **1/h** | Sniper-gated : LOCAL SELL + setup ICT complet (sweep+BOS+PD) ≥ seuil — **push mobile émis** |
+| `[SELL-OPPORTUNITY]` | idem (branche legacy `Require_Sniper=false`) | Max **1/h** | Mode legacy PR #4 : LOCAL SELL seul — **push mobile émis** |
+| `[SELL-SKIPPED-LOW-CONF]` | idem | Max **1/h** | BUY bloqué mais LOCAL ne détecte pas de SELL ≥ 55 % (dir / conf reportés) |
+| `[SELL-SKIPPED-NO-SNIPER]` | idem (v2.3) | Max **1/h** | LOCAL SELL OK mais Sniper M15 rejette (reason + sweep + BOS + score/seuil reportés) |
+| `[DEAL-v2]` | `GoldML_QualityFilters.mqh` | À chaque passage autorisé | (Existant avant v2.2) Score calculé, passage autorisé |
 
-> **Note :** le dry-run grep de ces 4 nouveaux tags sur les logs EA disponibles avant compilation v2.2 (`/home/traderadmin/logs_diag_2026-04/*.log` + `20260420_filtered.log`) retourne **0 occurrences** — cohérent avec le fait que le code n'a pas encore été compilé côté VPS Windows au jour de cette mise à jour doc.
+> **Estimation post-refactor v2.3** : sur les 12 alertes `[SELL-OPPORTUNITY]` du 23/04/2026, le filtre Sniper aurait vraisemblablement validé **1-3 alertes** (celles correspondant à un vrai sweep HIGH + BOS bearish confirmé sur M15), les 9-11 autres tombant en `[SELL-SKIPPED-NO-SNIPER]`. Réduction attendue du bruit ≈ 75-90 %. À vérifier empiriquement sur 1 semaine post-déploiement.
 
 ---
 
@@ -523,8 +533,8 @@ Fichiers trackés git :
 
 | Fichier | Lignes | Rôle | Dernière modif |
 |---|---|---|---|
-| `Gold_News_Institutional_EA.mq5` | **2235** | Point d'entrée EA (OnInit/OnTick/OnTrade), magic `888892`, `#property version "2.10"`, Print label `v2.2` (MAJ 2026-04-22) | 2026-04-22 |
-| `GoldML_SniperEntry_M15.mqh` | **1874** | `CSniperM15` — détection sweep/BOS/CHoCH/pullback, scoring 0-100 | 2026-04-17 18:24 |
+| `Gold_News_Institutional_EA.mq5` | **2235** | Point d'entrée EA (OnInit/OnTick/OnTrade), magic `888892`, `#property version "2.10"`, Print label `v2.3` (MAJ 2026-04-23 — Sniper-gated SELL alerts) | 2026-04-23 |
+| `GoldML_SniperEntry_M15.mqh` | **1874** | `CSniperM15` — détection sweep/BOS/CHoCH/pullback, scoring 0-100 ; expose `ValidateSetup(direction)` (dry-run v2.3) | 2026-04-23 |
 | `GoldML_PositionManager_V2.mqh` | 901 | `CPositionManagerV2` — partial TP, BE, trailing ATR | 2026-04-15 20:05 |
 | `GoldML_QualityFilters.mqh` | **1018** | `CQualityFilters` — cooldown, daily limit, range filter, **DEAL v2 H4**, **P2 veto H4 hard** + **P3 DEAL-v2 reject threshold** (MAJ 2026-04-22) | 2026-04-22 |
 | `GoldML_ICT_Detector.mqh` | 527 | `CICT_Detector` — primitives CHoCH/BOS/FVG/OB, `DetectShiftM5` | 2026-04-17 14:07 |
@@ -625,13 +635,15 @@ Enable_Dashboard       = true
 Enable_Alerts          = true
 ```
 
-#### Garde-fous P2/P3 + Alertes SELL (EA v2.2 — 2026-04-22, voir §4.9)
+#### Garde-fous P2/P3 + Alertes SELL (EA v2.3 — 2026-04-23, voir §4.9)
 ```
 Enable_H4_Hard_Veto            = true    (P2 : veto H4 structurel BEARISH LH+LL / BULLISH HH+HL)
 DEAL_Reject_Threshold          = -20     (P3 : seuil configurable, remplace hardcode -25 ; -99 = rollback safety)
 Enable_SellOpportunity_Alerts  = true    (Master switch : false = rollback total au comportement pré-alertes)
 SellAlert_Push_Notification    = true    (SendNotification() push MT5 mobile natif)
 SellAlert_Logs_Only            = false   (true = logs only, pas de push)
+SellAlert_Require_Sniper       = true    (v2.3 : alertes ICT-grade Sniper M15 ; false = legacy LOCAL seul)
+SellAlert_Sniper_Min_Score     = 70      (v2.3 : seuil score Sniper pour déclencher [SELL-OPPORTUNITY-ICT])
 ```
 
 ### 5.3 Projet secondaire : `Turtle` (FTMO 100K, indépendant)

@@ -237,6 +237,25 @@ public:
    SniperResultM15 GetLastResult() { return m_lastResult; }
    void PrintAnalysis(SniperResultM15 &result);
 
+   // PR feat/sniper-gated-sell-alerts (2026-04-23): dry-run validation pour hook
+   // observer (ex. EvaluateSellOpportunity). Reutilise toute la pipeline ICT
+   // (sweep / BOS / pullback / M5 / scoring) sans ouvrir d ordre et sans polluer
+   // m_lastResult (ce cache peut servir a d autres consommateurs downstream).
+   //
+   // Pourquoi confidence=0 : on veut du strict ICT. Le bypass SETUP-A dans
+   // AnalyzeEntry autorise un setup "BOS direct" quand confidence>=75 && H4 forte,
+   // ce qui contourne le sweep obligatoire. Pour une alerte "ICT-grade" on refuse
+   // ce shortcut — un sweep reel doit exister.
+   //
+   // Pourquoi timingMode="CLEAR" : evite les relaxations de pullback liees au
+   // POST_NEWS (cf. AnalyzePullback). On valide sur les regles standard.
+   SniperResultM15 ValidateSetup(string direction) {
+      SniperResultM15 backup = m_lastResult;
+      SniperResultM15 r = AnalyzeEntry(direction, 0.0, "CLEAR");
+      m_lastResult = backup;
+      return r;
+   }
+
    // PHASE 2 APPROCHE A (2026-04-14) : injection niveaux ICT + flag runtime
    // (Enable_ICT_Liquidity est un input EA, non accessible depuis la .mqh)
    void SetLiquidity(CLiquidityLevels* liq)  { m_liquidity = liq; }
