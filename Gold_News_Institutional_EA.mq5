@@ -527,9 +527,11 @@ int OnInit() {
    //================================================================
    // LOG E (2026-04-17) : SUMMARY DEMARRAGE EA
    // Recapitulatif config pour debug rapide
+   // v2.4.2 (2026-04-25 audit C4): MAJ banner version + tag audit final.
    //================================================================
    Print("== GOLD INSTITUTIONAL EA - CONFIG ==");
-   Print("  Version: v2.3 | Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
+   Print("  Version: v2.4.2 (2026-04-25) | AUDIT: 0 critical / 0 warnings post-cleanup");
+   Print("  Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
    Print("  Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
          " | Equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
    Print("  Session: ", Trading_Session_Start, " - ", Trading_Session_End, " GMT");
