@@ -56,7 +56,9 @@ struct TradeRecord {
 class CQualityFilters {
 private:
    string   m_symbol;
-   int      m_magic;
+   // v2.4 (2026-04-25): split magic BUY/SELL pour separation stats
+   int      m_magicBuy;
+   int      m_magicSell;
    
    // Settings - Cooldown
    bool     m_enableCooldown;
@@ -149,8 +151,10 @@ private:
    bool     CheckTrendH4(string direction, double apiConfidence = 60.0);
 
 public:
-   CQualityFilters(string symbol, int magic);
+   CQualityFilters(string symbol, int magicBuy, int magicSell);
    ~CQualityFilters();
+   // v2.4: helper pour matcher l'un OU l'autre magic dans les requetes history/positions
+   bool IsOurMagic(long m) { return (m == (long)m_magicBuy) || (m == (long)m_magicSell); }
    
    // Initialization
    bool Initialize(bool enableCooldown = true,
@@ -237,9 +241,10 @@ public:
 //+------------------------------------------------------------------+
 //| Constructor                                                       |
 //+------------------------------------------------------------------+
-CQualityFilters::CQualityFilters(string symbol, int magic) {
+CQualityFilters::CQualityFilters(string symbol, int magicBuy, int magicSell) {
    m_symbol = symbol;
-   m_magic = magic;
+   m_magicBuy  = magicBuy;
+   m_magicSell = magicSell;
    
    m_hATR = INVALID_HANDLE;
 
@@ -415,7 +420,7 @@ bool CQualityFilters::IsSameLevel(double price) {
 bool CQualityFilters::InTradingSession() {
    MqlDateTime t;
    // FIX TIMEZONE FINAL (2026-04-05): TimeGMT() au lieu de TimeCurrent()
-   // Session_Start='07:00' et Session_End='18:00' sont documentes en GMT
+   // Trading_Session_Start/End (v2.4: ex Session_Start/End) sont documentes en GMT
    // TimeCurrent() = heure serveur MT5 (UTC+2/+3 chez FTMO) -> decalage 2-3h
    // TimeGMT() = heure GMT reelle -> coherent avec Sniper, LocalSignal et VPS
    TimeToStruct(TimeGMT(), t);
@@ -470,7 +475,8 @@ void CQualityFilters::UpdateDailyStats() {
    
    for(int i = 0; i < HistoryDealsTotal(); i++) {
       ulong ticket = HistoryDealGetTicket(i);
-      if(ticket > 0 && HistoryDealGetInteger(ticket, DEAL_MAGIC) == m_magic) {
+      // v2.4: agrege PnL sur les 2 magics (BUY + SELL)
+      if(ticket > 0 && IsOurMagic(HistoryDealGetInteger(ticket, DEAL_MAGIC))) {
          m_dailyPnL += HistoryDealGetDouble(ticket, DEAL_PROFIT);
       }
    }

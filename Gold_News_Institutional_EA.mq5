@@ -38,6 +38,10 @@ CPositionManagerV2* g_posMgr = NULL;
 CQualityFilters* g_filters = NULL;
 // PHASE 1 APPROCHE A: infrastructure niveaux ICT (non branchee Phase 1)
 CLiquidityLevels* g_liquidity = NULL;
+// v2.4 (2026-04-25) : detecteur ICT dedie aux scans H1 (FVG H1, futures Breaker H1)
+CICT_Detector* g_ictH1 = NULL;
+// v2.4 (2026-04-25) : timestamp du dernier log WEEKLY-STATS (throttle 24h)
+datetime g_LastWeeklyStatsTime = 0;
 
 //+------------------------------------------------------------------+
 //| API CONFIGURATION                                                 |
@@ -97,7 +101,8 @@ input double Sniper_SL_Min_Pips = 25.0;    // M15: SL minimum (evite stop hunts 
 // Max SL etendu 45 -> 55 pips (2026-04-17)
 // Gold FTMO spread 50-65 pts impose SL minimum realiste
 // Coherent avec filtre Option 5A SL-5A dans Sniper (seuil 55)
-input double Sniper_SL_Max_Pips = 55.0;    // M15: SL max (partial TP toujours viable)
+// v2.4 (2026-04-25): renomme Sniper_SL_Max_Pips -> SL_Cap_Pips (alias semantique)
+input double SL_Cap_Pips        = 55.0;    // M15: SL max / cap (partial TP toujours viable)
 input bool   Use_M5_Confirmation = true;   // Confirmation pattern M5
 
 //+------------------------------------------------------------------+
@@ -120,12 +125,19 @@ input double Trail_ATR_Mult = 1.5;
 input group "â•â•â• RISK MANAGEMENT FTMO â•â•â•"
 // AUDIT-C4: Dynamic sizing by risk % replaces fixed lot size
 input double Risk_Percent    = 1.0;   // % of equity risked per trade (default 1%)
-input double Max_Risk_Percent = 2.0;  // Hard cap on risk % per trade
+// v2.4 (2026-04-25): renomme Max_Risk_Percent -> Hard_Cap_Risk + durcissement 2.0 -> 1.5
+input double Hard_Cap_Risk   = 1.5;   // Hard cap on risk % per trade (v2.4: 2.0->1.5)
 // AUDIT-C4: DEPRECATED — kept for backwards compatibility only; ignored when Risk_Percent > 0
 input double Base_Lot_Size = 0.10;    // DEPRECATED: use Risk_Percent instead
-input int    Magic_Number = 888892;
+// v2.4 (2026-04-25): split Magic_Number -> Magic_Number_BUY + Magic_Number_SELL
+// Permet de filtrer l'historique BUY vs SELL pour stats post-3-semaines.
+// Les positions ouvertes pre-v2.4 (magic=888892) restent associees au cote BUY.
+input int    Magic_Number_BUY  = 888892;
+input int    Magic_Number_SELL = 888893;
 input double Max_Daily_Loss_EUR = 400.0;
 input double Max_Daily_Trades = 6;
+// v2.4 (2026-04-25): throttle global entre trades (3600s = 1h, FTMO-safe)
+input int    TradeThrottleSeconds = 3600;
 input double FTMO_Daily_DD_Limit = 4.5;    // % - arrÃªt Ã  4.5% (avant 5%)
 // FIX C3 (2026-04-03): Balance initiale FTMO pour calcul DD total
 input double FTMO_Initial_Balance = 10000.0;  // Taille du compte FTMO challenge 10K
@@ -150,8 +162,11 @@ input bool   Enable_Session_Filter = true;
 //   - London Open       (07:00-16:00 GMT)
 //   - NY Session        (13:00-21:00 GMT)
 // Modifier si besoin via inputs MT5
-input string Session_Start = "00:00";
-input string Session_End   = "21:00";
+// v2.4 (2026-04-25): renomme Session_Start/End -> Trading_Session_*
+input string Trading_Session_Start = "00:00";
+input string Trading_Session_End   = "21:00";
+// v2.4: eviter heure de rollover broker (22:00-23:00 GMT) - spread anormal
+input bool   Skip_Rollover         = true;
 
 
 //+------------------------------------------------------------------+
@@ -186,6 +201,54 @@ input bool   Enable_H4_Hard_Veto = true;
 // ce seuil n est pas evalue (comportement attendu).
 input group "=== DEAL-v2 REJECT THRESHOLD ==="
 input int    DEAL_Reject_Threshold = -20;
+
+//+------------------------------------------------------------------+
+//| v2.4 BYPASS VPS / DEBUG (2026-04-25)                              |
+//+------------------------------------------------------------------+
+// Bypass du filtre directionnel VPS : audit confirme EA solide en LOCAL/ICT.
+// VPS conserve pour news (BLACKOUT, PRE_NEWS, POST_NEWS) si Use_VPS_News_Protection=true.
+// Force_Direction_Override : utiliser uniquement pour debug (bypass complet du
+// pipeline de selection de direction).
+input group "=== v2.4 BYPASS VPS / DEBUG ==="
+input bool   Use_VPS_Direction        = false;   // false = LOCAL/ICT decide direction
+input bool   Use_VPS_News_Protection  = true;    // true = blackout/PRE/POST news actifs
+input bool   Log_Verbose              = true;    // true = logs detailles (heartbeat, score)
+input bool   Use_Debug_Mode           = false;   // true = traces additionnelles
+input bool   Force_Direction_Override = false;   // true = force direction (debug)
+input string Force_Direction_Value    = "NONE";  // BUY / SELL / NONE
+
+//+------------------------------------------------------------------+
+//| v2.4 ICT EXTENSIONS (2026-04-25)                                  |
+//+------------------------------------------------------------------+
+// Pipeline ICT etendu : 4 ajouts pour completer detection setups premium.
+//  - Premium/Discount Filter : binaire, rejette setup hors zone D1
+//  - Breaker Block : OB casse devient zone opposee (resistance/support)
+//  - Mitigation Block : OB partiellement teste puis rejete
+//  - FVG H1 : FVG sur HTF, priorite > FVG M5
+input group "=== v2.4 ICT EXTENSIONS ==="
+input bool   Enable_Premium_Discount_Filter = true;
+input bool   Enable_Breaker_Block           = true;
+input bool   Enable_Mitigation_Block        = true;
+input bool   Enable_FVG_H1                  = true;
+
+//+------------------------------------------------------------------+
+//| v2.4.1 SCORING WEIGHTS HTF (2026-04-25)                           |
+//+------------------------------------------------------------------+
+// Bonus additifs HTF appliques apres CSniperM15::CalculateScore (cap 100 final).
+// Cumulatif maximum : +30 (15 + 10 + 5).
+//
+// v2.4.1 (audit P2-D - Option C): suppression de 5 weights orphelins
+// declares en v2.4 mais jamais consommes (Weight_Sweep / Weight_BOS /
+// Weight_FVG_M5 / Weight_OB / Weight_Fib_OTE). Le scoring Sniper interne
+// utilise des valeurs hardcodees dans CSniperM15::CalculateScore et
+// presente trop de variantes (multi-types de sweep, OB par direction, etc.)
+// pour se preter a une parametrisation simple sans refactor profond.
+// Refactor propre planifie en v2.5 avec backtest avant/apres.
+// Ref: Etat_Actuel_Systeme.md §4.10
+input group "=== v2.4.1 SCORING WEIGHTS HTF ==="
+input int    Weight_FVG_H1     = 15;  // bonus si FVG H1 alignee + non mitigee
+input int    Weight_Breaker    = 10;  // bonus si Breaker Block (OB countertrend casse + retest)
+input int    Weight_Mitigation = 5;   // bonus si Mitigation Block (OB samedir intacte + retest)
 
 //+------------------------------------------------------------------+
 //| SELL OPPORTUNITY ALERTS (PR serie 3 — 2026-04-22)                |
@@ -291,6 +354,10 @@ datetime g_DayStart = 0;
 double g_DayStartBalance = 0;  // FIX C-9.1 (2026-04-03): Balance début de journée FTMO
 int g_TradesToday = 0;
 int g_LocalTradesToday = 0;  // Compteur trades en mode local
+// v2.4.1 (2026-04-25): Throttle global inter-trades (audit P2-A) - cable dans
+// CheckEntry pour respecter TradeThrottleSeconds. Persiste via RecalcDailyStats
+// au restart EA pour eviter un double-trade collé apres reboot.
+datetime g_LastTradeTime = 0;
 
 // FIX A3+A4 (2026-04-04): Handles locaux caches (OnInit au lieu de chaque tick)
 int g_hLocalEMA20 = INVALID_HANDLE;
@@ -318,7 +385,8 @@ int OnInit() {
       Print("âš ï¸ WARNING: EA optimized for XAUUSD, running on ", _Symbol);
    }
    
-   trade.SetExpertMagicNumber(Magic_Number);
+   // v2.4 (2026-04-25): magic par defaut = BUY ; ExecuteTrade re-set le magic par direction
+   trade.SetExpertMagicNumber(Magic_Number_BUY);
    trade.SetDeviationInPoints(10);
    
    // Initialize signal
@@ -338,7 +406,7 @@ int OnInit() {
          Sniper_Require_Sweep, Sniper_Require_BOS,
          Sniper_Min_RR, Sniper_Min_Score, Sniper_Max_Spread,
          true, 10,  // Session boost (max 10 for overlap)
-         Sniper_SL_Buffer_Pips, Sniper_SL_Min_Pips, Sniper_SL_Max_Pips,
+         Sniper_SL_Buffer_Pips, Sniper_SL_Min_Pips, SL_Cap_Pips,
          Use_M5_Confirmation)) {
       Print("âŒ Sniper M15 initialization failed");
       delete g_sniper;
@@ -348,7 +416,7 @@ int OnInit() {
    Print("âœ… Sniper M15 initialized (M15 + M5 + ICT)");
    
    // CORRECTION 3: Initialize Position Manager avec validation
-   g_posMgr = new CPositionManagerV2(_Symbol, Magic_Number);
+   g_posMgr = new CPositionManagerV2(_Symbol, Magic_Number_BUY, Magic_Number_SELL);
    if(g_posMgr == NULL) {
       Print("âŒ Failed to create Position Manager object");
       return INIT_FAILED;
@@ -368,7 +436,7 @@ int OnInit() {
    Print("âœ… Position Manager initialized");
    
    // CORRECTION 4: Initialize Quality Filters avec validation
-   g_filters = new CQualityFilters(_Symbol, Magic_Number);
+   g_filters = new CQualityFilters(_Symbol, Magic_Number_BUY, Magic_Number_SELL);
    if(g_filters == NULL) {
       Print("âŒ Failed to create Quality Filters object");
       return INIT_FAILED;
@@ -384,7 +452,7 @@ int OnInit() {
          true, 4, 10, 5,       // Consecutive: losses=4, wins=10, sameDir=5
          true, 30.0, 5,        // Same level
          true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0,
-         Enable_Session_Filter, Session_Start, Session_End, false,
+         Enable_Session_Filter, Trading_Session_Start, Trading_Session_End, false,
          true,                  // enableTrendFilter (defaut explicite)
          Enable_H4_Hard_Veto,   // P2 (2026-04-22): veto structurel H4
          DEAL_Reject_Threshold  // P3 (2026-04-22): seuil de rejet DEAL-v2
@@ -416,6 +484,18 @@ int OnInit() {
       g_sniper.SetUseICTLiquidity(Enable_ICT_Liquidity);
       Print("[PHASE2] g_liquidity passe au Sniper | ICT sweep=",
             Enable_ICT_Liquidity ? "ON" : "OFF");
+   }
+
+   // v2.4 (2026-04-25) : detecteur ICT dedie aux scans HTF (FVG H1, etc.)
+   // Le sniper M15 a son propre detecteur interne pour M5 ; on en cree un
+   // second au niveau EA pour les scans H1, evitant de partager l'etat.
+   g_ictH1 = new CICT_Detector(_Symbol);
+   if(g_ictH1 == NULL) {
+      Print("[FVG-H1] WARNING: echec allocation CICT_Detector H1 - bonus desactive runtime");
+   } else {
+      Print("[FVG-H1] H1 detector initialise | Enable_FVG_H1=",
+            Enable_FVG_H1 ? "ON" : "OFF",
+            " | Weight_FVG_H1=", Weight_FVG_H1);
    }
 
    // CORRECTION 5: Initial API fetch avec meilleure gestion d'erreur
@@ -451,7 +531,7 @@ int OnInit() {
    Print("  Version: v2.3 | Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
    Print("  Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
          " | Equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
-   Print("  Session: ", Session_Start, " - ", Session_End, " GMT");
+   Print("  Session: ", Trading_Session_Start, " - ", Trading_Session_End, " GMT");
    Print("  Max Spread: ", DoubleToString(Sniper_Max_Spread, 1), " pips");
    Print("  Risk: ", DoubleToString(Risk_Percent, 1), "%",
          " | Test Lot: ", DoubleToString(Phase_Test_Force_Lot, 2));
@@ -461,7 +541,7 @@ int OnInit() {
          " | H4 Hard Veto (P2): ", Enable_H4_Hard_Veto ? "ON" : "OFF",
          " | DEAL Reject (P3): ", DEAL_Reject_Threshold);
    Print("  Min Score: ", Sniper_Min_Score,
-         " | Max SL: ", DoubleToString(Sniper_SL_Max_Pips, 0), " pips",
+         " | Max SL: ", DoubleToString(SL_Cap_Pips, 0), " pips",
          " | Reclaim: 8 bougies | Scan sweep: 96 bougies (24h)");
    Print("====================================");
 
@@ -508,6 +588,11 @@ void OnDeinit(const int reason) {
    if(g_liquidity != NULL) {
       delete g_liquidity;
       g_liquidity = NULL;
+   }
+   // v2.4 (2026-04-25) : cleanup detecteur H1
+   if(g_ictH1 != NULL) {
+      delete g_ictH1;
+      g_ictH1 = NULL;
    }
 
    Comment("");
@@ -587,10 +672,12 @@ void OnTick() {
 
    //================================================================
    // LOG A (2026-04-17) : DIAGNOSTIC SYNTHESE TOUTES LES 60s
-   // Permet de comprendre en temps reel l'etat global du systeme
+   // Permet de comprendre en temps reel l'etat global du systeme.
+   // v2.4.1 (audit P2-E): guarde par Log_Verbose. Si false, le diagnostic
+   // est suprime (ne supprime PAS les logs de trade ouverts ou rejets).
    //================================================================
    static datetime lastDiagLog = 0;
-   if(TimeCurrent() - lastDiagLog >= 60) {
+   if(Log_Verbose && TimeCurrent() - lastDiagLog >= 60) {
       lastDiagLog = TimeCurrent();
 
       double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -679,15 +766,91 @@ void OnTick() {
 //+------------------------------------------------------------------+
 //| TIMER FUNCTION - API health check sans ticks                      |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| v2.4 WEEKLY-STATS - Snapshot perf 7 derniers jours (2026-04-25)   |
+//+------------------------------------------------------------------+
+// Aggregation des deals fermes sur les 7 derniers jours, filtres par
+// Magic_Number_BUY ou Magic_Number_SELL. Calcule trades, win-rate,
+// profit factor, P/L net, P/L moyen.
+//
+// Hooke dans OnTimer avec throttle 24h. Donne un signal de tendance
+// rapide pour evaluer la sante du EA en demo sans interroger MT5
+// manuellement.
+//+------------------------------------------------------------------+
+void ComputeAndLogWeeklyStats() {
+   datetime fromTime = TimeCurrent() - 7 * 86400;
+   datetime toTime   = TimeCurrent();
+
+   if(!HistorySelect(fromTime, toTime)) {
+      Print("[WEEKLY-STATS] HistorySelect failed - skip");
+      return;
+   }
+
+   int    totalDeals = HistoryDealsTotal();
+   int    trades     = 0;
+   int    wins       = 0;
+   int    losses     = 0;
+   double grossWin   = 0.0;
+   double grossLoss  = 0.0;  // valeur positive (somme des |pertes|)
+
+   for(int i = 0; i < totalDeals; i++) {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+
+      long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
+      if(magic != Magic_Number_BUY && magic != Magic_Number_SELL) continue;
+
+      // Compter uniquement les deals de fermeture (DEAL_ENTRY_OUT)
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT) continue;
+
+      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                    + HistoryDealGetDouble(ticket, DEAL_SWAP)
+                    + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+
+      trades++;
+      if(profit > 0.0) {
+         wins++;
+         grossWin += profit;
+      } else if(profit < 0.0) {
+         losses++;
+         grossLoss += MathAbs(profit);
+      }
+      // profit == 0 : break-even, compte dans trades mais ni win ni loss
+   }
+
+   if(trades == 0) {
+      Print("[WEEKLY-STATS] last 7d | trades=0",
+            " | (BUY_magic=", Magic_Number_BUY, " SELL_magic=", Magic_Number_SELL, ")");
+      return;
+   }
+
+   double netPL        = grossWin - grossLoss;
+   double winRate      = 100.0 * wins / trades;
+   double profitFactor = (grossLoss > 0.001) ? (grossWin / grossLoss)
+                                              : (grossWin > 0.0 ? 999.99 : 0.0);
+   double avgTrade     = netPL / trades;
+
+   Print("[WEEKLY-STATS] last 7d",
+         " | trades=", trades,
+         " | WR=", DoubleToString(winRate, 1), "%",
+         " (", wins, "W/", losses, "L)",
+         " | PF=", DoubleToString(profitFactor, 2),
+         " | net=", DoubleToString(netPL, 2),
+         " | avg=", DoubleToString(avgTrade, 2),
+         " | grossWin=", DoubleToString(grossWin, 2),
+         " grossLoss=", DoubleToString(grossLoss, 2));
+}
+
 void OnTimer() {
    // Skip si en position (OnTick gÃ¨re dÃ©jÃ )
    if(g_InPosition) return;
-   
+
    // Skip weekend
    MqlDateTime dt;
    TimeCurrent(dt);
    if(dt.day_of_week == 0 || dt.day_of_week == 6) return;
-   
+
    // CORRECTION 11: Refresh API avec throttling
    if((TimeCurrent() - g_LastAPICall) >= API_Refresh_Seconds) {
       // Silencieux sauf si succÃ¨s
@@ -695,12 +858,19 @@ void OnTimer() {
          static string lastMode = "";
          // Ne print que si timing_mode change
          if(g_Signal.timing_mode != lastMode) {
-            Print("ðŸ”„ Timer: API OK - ", g_Signal.direction, 
-                  " | Confidence: ", g_Signal.confidence, 
+            Print("ðŸ”„ Timer: API OK - ", g_Signal.direction,
+                  " | Confidence: ", g_Signal.confidence,
                   "% | Timing: ", g_Signal.timing_mode);
             lastMode = g_Signal.timing_mode;
          }
       }
+   }
+
+   // v2.4 (2026-04-25) : WEEKLY-STATS — log perf 7 jours, throttle 24h.
+   // Premier appel ~60s apres EA start (g_LastWeeklyStatsTime=0).
+   if(TimeCurrent() - g_LastWeeklyStatsTime >= 86400) {
+      ComputeAndLogWeeklyStats();
+      g_LastWeeklyStatsTime = TimeCurrent();
    }
 }
 
@@ -1188,6 +1358,398 @@ void EvaluateSellOpportunity(string buyBlockReason, double currentPrice) {
 }
 
 //+------------------------------------------------------------------+
+//| v2.4 PREMIUM/DISCOUNT ARRAY FILTER (2026-04-25)                   |
+//+------------------------------------------------------------------+
+// Verifie que le prix est dans la bonne moitie de la range D1 :
+//   BUY  -> Discount Array (0-50% : Bid <= median D1 precedente)
+//   SELL -> Premium Array  (50-100% : Bid >= median D1 precedente)
+// Filtre binaire : un setup hors zone est rejete (pas de trade contre la
+// structure HTF). Si l'EA ne peut pas lire D1[1] (ex: marche ferme), on
+// degrade en pass-through pour ne pas bloquer artificiellement.
+//+------------------------------------------------------------------+
+bool CheckPremiumDiscountFilter(string direction) {
+   double prevHigh = iHigh(_Symbol, PERIOD_D1, 1);
+   double prevLow  = iLow(_Symbol,  PERIOD_D1, 1);
+
+   if(prevHigh <= 0 || prevLow <= 0 || prevHigh <= prevLow) {
+      // Donnees D1 indisponibles -> on n'impose pas le filtre
+      Print("[PD-FILTER-DECISION] PASS (D1 data unavailable, fail-open)");
+      return true;
+   }
+
+   double median = (prevHigh + prevLow) / 2.0;
+   double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   bool inZone = false;
+   string zone;
+   if(direction == "BUY") {
+      inZone = (bid <= median);
+      zone   = "Discount";
+   } else if(direction == "SELL") {
+      inZone = (bid >= median);
+      zone   = "Premium";
+   } else {
+      // Direction inconnue -> ne pas bloquer
+      return true;
+   }
+
+   if(inZone) {
+      Print("[PD-FILTER-PASS] dir=", direction, " zone=", zone,
+            " bid=", DoubleToString(bid, _Digits),
+            " median=", DoubleToString(median, _Digits),
+            " D1[", DoubleToString(prevLow, _Digits),
+            "..", DoubleToString(prevHigh, _Digits), "]");
+      return true;
+   }
+
+   Print("[PD-FILTER-REJECT] dir=", direction, " zone_attendue=", zone,
+         " bid=", DoubleToString(bid, _Digits),
+         " median=", DoubleToString(median, _Digits),
+         " (hors zone HTF)");
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| v2.4 FVG H1 DETECTION (2026-04-25)                                |
+//+------------------------------------------------------------------+
+// Detecte la derniere FVG H1 dans le sens du trade pour bonifier le score
+// Sniper. Une FVG H1 ouverte = imbalance HTF non comble, signal de
+// continuation ICT plus fort qu'une simple FVG M5.
+//
+// Reutilise CICT_Detector::FindLatestFVG (meme algo que la FVG M5 du
+// pullback Sniper) avec les arrays H1 sur les 50 dernieres bougies (~2j).
+// Une FVG deja mitigated (entierement comble par le prix actuel) ne compte
+// pas : on ne veut que des imbalances ouvertes.
+//
+// Signature : retourne true si une FVG H1 valide est trouvee, remplit outFvg.
+//+------------------------------------------------------------------+
+bool DetectFVG_H1(string direction, ICT_PDArray &outFvg) {
+   if(g_ictH1 == NULL) return false;
+
+   const int lookback = 50;  // ~50 bougies H1 = ~2 jours
+
+   double   high_H1[];
+   double   low_H1[];
+   datetime time_H1[];
+
+   ArraySetAsSeries(high_H1, true);
+   ArraySetAsSeries(low_H1,  true);
+   ArraySetAsSeries(time_H1, true);
+
+   if(CopyHigh(_Symbol, PERIOD_H1, 0, lookback + 5, high_H1) <= 0) return false;
+   if(CopyLow (_Symbol, PERIOD_H1, 0, lookback + 5, low_H1)  <= 0) return false;
+   if(CopyTime(_Symbol, PERIOD_H1, 0, lookback + 5, time_H1) <= 0) return false;
+
+   if(!g_ictH1.FindLatestFVG(direction, high_H1, low_H1, time_H1, lookback, outFvg))
+      return false;
+
+   if(!outFvg.found) return false;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(g_ictH1.IsMitigated(bid, outFvg, 0.0)) {
+      Print("[FVG-H1-MITIGATED] zone=[", DoubleToString(outFvg.zoneLow, _Digits),
+            "..", DoubleToString(outFvg.zoneHigh, _Digits),
+            "] dejà comblee par bid=", DoubleToString(bid, _Digits));
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| v2.4 BREAKER BLOCK DETECTION (2026-04-25)                         |
+//+------------------------------------------------------------------+
+// Detecte un Breaker Block M15 dans le sens du trade.
+//
+// Definition ICT :
+//   Bullish Breaker = bearish OB (down-candle = resistance) dont le high a
+//   ete brise par price action haussiere. Quand le prix y revient pour
+//   retester, la zone flippe de resistance -> support pour un BUY.
+//   Bearish Breaker = mirror (bullish OB dont le low a ete brise).
+//
+// Algorithme (M15, lookback 80 bars) :
+//   1. Scanner les bougies pour trouver un OB candidate (bearish pour BUY,
+//      bullish pour SELL) avec body >= 0.3 * ATR
+//   2. Verifier qu'une bougie subsequente CLOSE au-dela de la zone
+//      (BOS upward pour BUY, BOS downward pour SELL)
+//   3. Verifier que le bid actuel est revenu dans la zone OB (retest)
+//
+// Strength : body/ATR * 30 (cap 100), meme normalisation que FindLatestOB.
+//+------------------------------------------------------------------+
+bool DetectBreakerBlock(string direction, ICT_PDArray &outBreaker) {
+   outBreaker.found      = false;
+   outBreaker.type       = ICT_PD_NONE;
+   outBreaker.name       = "NONE";
+   outBreaker.zoneHigh   = 0;
+   outBreaker.zoneLow    = 0;
+   outBreaker.createdBar = -1;
+   outBreaker.strength   = 0;
+
+   const int lookback = 80;
+   const int bars     = lookback + 5;
+
+   double   open_M15[];
+   double   close_M15[];
+   double   high_M15[];
+   double   low_M15[];
+   datetime time_M15[];
+
+   ArraySetAsSeries(open_M15,  true);
+   ArraySetAsSeries(close_M15, true);
+   ArraySetAsSeries(high_M15,  true);
+   ArraySetAsSeries(low_M15,   true);
+   ArraySetAsSeries(time_M15,  true);
+
+   if(CopyOpen (_Symbol, PERIOD_M15, 0, bars, open_M15)  <= 0) return false;
+   if(CopyClose(_Symbol, PERIOD_M15, 0, bars, close_M15) <= 0) return false;
+   if(CopyHigh (_Symbol, PERIOD_M15, 0, bars, high_M15)  <= 0) return false;
+   if(CopyLow  (_Symbol, PERIOD_M15, 0, bars, low_M15)   <= 0) return false;
+   if(CopyTime (_Symbol, PERIOD_M15, 0, bars, time_M15)  <= 0) return false;
+
+   double atr = 0.0;
+   if(g_hLocalATR != INVALID_HANDLE) {
+      double atrBuf[];
+      if(CopyBuffer(g_hLocalATR, 0, 0, 3, atrBuf) >= 3) {
+         atr = atrBuf[1];
+      }
+   }
+   if(atr <= 0.0) {
+      Print("[BREAKER] WARNING: ATR M15 indisponible - detection skipped");
+      return false;
+   }
+
+   const double minBody = 0.3 * atr;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   int n      = ArraySize(close_M15);
+   int maxIdx = MathMin(lookback, n - 2);
+
+   // Scan recent -> ancien. Index 0 = bougie en cours. On laisse place
+   // pour break+retest, donc on commence a i=5.
+   for(int i = 5; i <= maxIdx; i++) {
+      double body = MathAbs(close_M15[i] - open_M15[i]);
+      if(body < minBody) continue;
+
+      bool isBear = (close_M15[i] < open_M15[i]);
+      bool isBull = (close_M15[i] > open_M15[i]);
+
+      double zoneHigh = high_M15[i];
+      double zoneLow  = low_M15[i];
+
+      if(direction == "BUY" && isBear) {
+         bool broken  = false;
+         int  breakBar = -1;
+         for(int j = i - 1; j >= 2; j--) {
+            if(close_M15[j] > zoneHigh) {
+               broken   = true;
+               breakBar = j;
+               break;
+            }
+         }
+         if(!broken) continue;
+
+         if(bid >= zoneLow && bid <= zoneHigh) {
+            outBreaker.found       = true;
+            outBreaker.type        = ICT_PD_OB;
+            outBreaker.zoneHigh    = zoneHigh;
+            outBreaker.zoneLow     = zoneLow;
+            outBreaker.createdBar  = i;
+            outBreaker.createdTime = time_M15[i];
+            outBreaker.strength    = MathMin(100.0, (body / atr) * 30.0);
+            outBreaker.name        = "BREAKER";
+
+            Print("[BREAKER-DETAIL] dir=BUY OB_bar=", i,
+                  " zone=[", DoubleToString(zoneLow, _Digits),
+                  "..", DoubleToString(zoneHigh, _Digits), "]",
+                  " break_bar=", breakBar,
+                  " body/ATR=", DoubleToString(body / atr, 2),
+                  " bid=", DoubleToString(bid, _Digits), " (in_zone)");
+            return true;
+         }
+      }
+      else if(direction == "SELL" && isBull) {
+         bool broken  = false;
+         int  breakBar = -1;
+         for(int j = i - 1; j >= 2; j--) {
+            if(close_M15[j] < zoneLow) {
+               broken   = true;
+               breakBar = j;
+               break;
+            }
+         }
+         if(!broken) continue;
+
+         if(bid >= zoneLow && bid <= zoneHigh) {
+            outBreaker.found       = true;
+            outBreaker.type        = ICT_PD_OB;
+            outBreaker.zoneHigh    = zoneHigh;
+            outBreaker.zoneLow     = zoneLow;
+            outBreaker.createdBar  = i;
+            outBreaker.createdTime = time_M15[i];
+            outBreaker.strength    = MathMin(100.0, (body / atr) * 30.0);
+            outBreaker.name        = "BREAKER";
+
+            Print("[BREAKER-DETAIL] dir=SELL OB_bar=", i,
+                  " zone=[", DoubleToString(zoneLow, _Digits),
+                  "..", DoubleToString(zoneHigh, _Digits), "]",
+                  " break_bar=", breakBar,
+                  " body/ATR=", DoubleToString(body / atr, 2),
+                  " bid=", DoubleToString(bid, _Digits), " (in_zone)");
+            return true;
+         }
+      }
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| v2.4 MITIGATION BLOCK DETECTION (2026-04-25)                      |
+//+------------------------------------------------------------------+
+// Detecte un Mitigation Block M15 dans le sens du trade.
+//
+// Definition ICT (et distinction vs Breaker) :
+//   Bullish Mitigation = bullish OB (same-direction, up-candle) intacte —
+//   jamais violee a la baisse depuis sa creation — et actuellement en
+//   retest. Signal ICT de continuation : la zone d origine a tenu, le
+//   prix revient mitiger l imbalance puis devrait poursuivre haut.
+//   Bearish Mitigation = mirror.
+//
+//   vs Breaker (commit 5) : le Breaker est une OB COUNTER-direction VIOLEE
+//   qui flippe sa polarite. La Mitigation est une OB SAME-direction INTACTE.
+//
+// Algorithme (M15, lookback 80 bars) :
+//   1. Scanner les bougies pour trouver un OB candidate dans le sens du
+//      trade (bullish pour BUY, bearish pour SELL) avec body >= 0.3 * ATR
+//   2. Verifier que la zone N A PAS ete violee depuis sa creation
+//      (aucun close < zoneLow pour BUY, aucun close > zoneHigh pour SELL)
+//   3. Verifier que le bid actuel est dans la zone (retest actif)
+//
+// Strength : body/ATR * 30 (cap 100), meme normalisation que les autres.
+//+------------------------------------------------------------------+
+bool DetectMitigationBlock(string direction, ICT_PDArray &outMitig) {
+   outMitig.found      = false;
+   outMitig.type       = ICT_PD_NONE;
+   outMitig.name       = "NONE";
+   outMitig.zoneHigh   = 0;
+   outMitig.zoneLow    = 0;
+   outMitig.createdBar = -1;
+   outMitig.strength   = 0;
+
+   const int lookback = 80;
+   const int bars     = lookback + 5;
+
+   double   open_M15[];
+   double   close_M15[];
+   double   high_M15[];
+   double   low_M15[];
+   datetime time_M15[];
+
+   ArraySetAsSeries(open_M15,  true);
+   ArraySetAsSeries(close_M15, true);
+   ArraySetAsSeries(high_M15,  true);
+   ArraySetAsSeries(low_M15,   true);
+   ArraySetAsSeries(time_M15,  true);
+
+   if(CopyOpen (_Symbol, PERIOD_M15, 0, bars, open_M15)  <= 0) return false;
+   if(CopyClose(_Symbol, PERIOD_M15, 0, bars, close_M15) <= 0) return false;
+   if(CopyHigh (_Symbol, PERIOD_M15, 0, bars, high_M15)  <= 0) return false;
+   if(CopyLow  (_Symbol, PERIOD_M15, 0, bars, low_M15)   <= 0) return false;
+   if(CopyTime (_Symbol, PERIOD_M15, 0, bars, time_M15)  <= 0) return false;
+
+   double atr = 0.0;
+   if(g_hLocalATR != INVALID_HANDLE) {
+      double atrBuf[];
+      if(CopyBuffer(g_hLocalATR, 0, 0, 3, atrBuf) >= 3) {
+         atr = atrBuf[1];
+      }
+   }
+   if(atr <= 0.0) {
+      Print("[MITIG] WARNING: ATR M15 indisponible - detection skipped");
+      return false;
+   }
+
+   const double minBody = 0.3 * atr;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   int n      = ArraySize(close_M15);
+   int maxIdx = MathMin(lookback, n - 2);
+
+   // Scan recent -> ancien. On commence a i=3 (laisse place au retest).
+   for(int i = 3; i <= maxIdx; i++) {
+      double body = MathAbs(close_M15[i] - open_M15[i]);
+      if(body < minBody) continue;
+
+      bool isBull = (close_M15[i] > open_M15[i]);
+      bool isBear = (close_M15[i] < open_M15[i]);
+
+      double zoneHigh = high_M15[i];
+      double zoneLow  = low_M15[i];
+
+      if(direction == "BUY" && isBull) {
+         // Verifier zone preservee : aucun close < zoneLow entre i-1 et 1
+         bool violated = false;
+         for(int j = i - 1; j >= 1; j--) {
+            if(close_M15[j] < zoneLow) {
+               violated = true;
+               break;
+            }
+         }
+         if(violated) continue;
+
+         if(bid >= zoneLow && bid <= zoneHigh) {
+            outMitig.found       = true;
+            outMitig.type        = ICT_PD_OB;
+            outMitig.zoneHigh    = zoneHigh;
+            outMitig.zoneLow     = zoneLow;
+            outMitig.createdBar  = i;
+            outMitig.createdTime = time_M15[i];
+            outMitig.strength    = MathMin(100.0, (body / atr) * 30.0);
+            outMitig.name        = "MITIGATION";
+
+            Print("[MITIG-DETAIL] dir=BUY OB_bar=", i,
+                  " zone=[", DoubleToString(zoneLow, _Digits),
+                  "..", DoubleToString(zoneHigh, _Digits), "]",
+                  " body/ATR=", DoubleToString(body / atr, 2),
+                  " bid=", DoubleToString(bid, _Digits), " (in_zone, intact)");
+            return true;
+         }
+      }
+      else if(direction == "SELL" && isBear) {
+         // Verifier zone preservee : aucun close > zoneHigh entre i-1 et 1
+         bool violated = false;
+         for(int j = i - 1; j >= 1; j--) {
+            if(close_M15[j] > zoneHigh) {
+               violated = true;
+               break;
+            }
+         }
+         if(violated) continue;
+
+         if(bid >= zoneLow && bid <= zoneHigh) {
+            outMitig.found       = true;
+            outMitig.type        = ICT_PD_OB;
+            outMitig.zoneHigh    = zoneHigh;
+            outMitig.zoneLow     = zoneLow;
+            outMitig.createdBar  = i;
+            outMitig.createdTime = time_M15[i];
+            outMitig.strength    = MathMin(100.0, (body / atr) * 30.0);
+            outMitig.name        = "MITIGATION";
+
+            Print("[MITIG-DETAIL] dir=SELL OB_bar=", i,
+                  " zone=[", DoubleToString(zoneLow, _Digits),
+                  "..", DoubleToString(zoneHigh, _Digits), "]",
+                  " body/ATR=", DoubleToString(body / atr, 2),
+                  " bid=", DoubleToString(bid, _Digits), " (in_zone, intact)");
+            return true;
+         }
+      }
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| CHECK ENTRY CONDITIONS (Dual-mode: API + Local)                   |
 //+------------------------------------------------------------------+
 void CheckEntry() {
@@ -1212,6 +1774,50 @@ void CheckEntry() {
    static datetime lastSniperBarM5   = 0;
    static string   lastSniperSetup   = "";
 
+   //================================================================
+   // THROTTLE INTER-TRADES (v2.4.1 - audit P2-A)
+   //================================================================
+   // Empeche d'ouvrir un nouveau trade tant que TradeThrottleSeconds ne sont
+   // pas ecoules depuis le dernier trade ouvert. Default 3600s (1h).
+   // Mettre TradeThrottleSeconds=0 pour desactiver. Court-circuite tot le
+   // pipeline pour eviter les analyses ICT inutiles.
+   if(TradeThrottleSeconds > 0 && g_LastTradeTime > 0) {
+      long elapsed = (long)(TimeCurrent() - g_LastTradeTime);
+      if(elapsed < TradeThrottleSeconds) {
+         REJECT("Throttle inter-trades " + IntegerToString((int)elapsed) +
+                "s/" + IntegerToString(TradeThrottleSeconds) + "s");
+      }
+   }
+
+   //================================================================
+   // SKIP ROLLOVER (v2.4.1 - audit P2-E)
+   //================================================================
+   // La fenetre 22:00-23:00 GMT est la session de rollover broker : spread
+   // typiquement 5-10x plus large que la normale. Default true => bloque
+   // les nouveaux trades dans cette fenetre. La session par defaut etant
+   // 00:00-21:00, le check est redondant tant que Trading_Session_End
+   // n'est pas pousse au-dela de 21:00. Garde de defense en profondeur.
+   if(Skip_Rollover) {
+      MqlDateTime _dtRoll;
+      TimeCurrent(_dtRoll);
+      if(_dtRoll.hour == 22) {
+         REJECT("Skip_Rollover (fenetre 22:00-23:00 GMT, spread anormal)");
+      }
+   }
+
+   //================================================================
+   // DEBUG TRACE (v2.4.1 - audit P2-E)
+   //================================================================
+   // Use_Debug_Mode=true active des traces additionnelles dans le pipeline.
+   // Default false pour ne pas spammer.
+   if(Use_Debug_Mode) {
+      Print("[DEBUG] CheckEntry pre-signal | throttle_elapsed=",
+            (g_LastTradeTime > 0 ? IntegerToString((int)(TimeCurrent() - g_LastTradeTime)) : "n/a"),
+            "s | TradeThrottleSeconds=", TradeThrottleSeconds,
+            " | trades_today=", g_TradesToday, "/", (int)Max_Daily_Trades,
+            " | api_valid=", (g_Signal.is_valid ? "true" : "false"));
+   }
+
    // === DETERMINER LA SOURCE DU SIGNAL ===
    string direction;
    double confidence;
@@ -1221,13 +1827,46 @@ void CheckEntry() {
    string tpMode;
    bool   widerStops;
 
+   // v2.4 (2026-04-25): Force_Direction_Override (debug uniquement) - bypass complet
+   // du pipeline de selection de direction. Utilisation : tests manuels en demo.
+   //
+   // v2.4.1 (2026-04-25 audit P2-B): Force_Direction NE bypasse PLUS la protection
+   // news. Si l'API VPS fournit un timingMode actif (BLACKOUT/PRE_NEWS_SETUP/
+   // POST_NEWS_ENTRY) et Use_VPS_News_Protection=true, la gate news en aval
+   // (.mq5 ~1875) bloquera le trade force. Sécurise le mode debug contre une
+   // execution accidentelle en plein NFP / FOMC.
+   if(Force_Direction_Override &&
+      (Force_Direction_Value == "BUY" || Force_Direction_Value == "SELL")) {
+      Print("[FORCE-DIR] Override actif - direction forcee a ", Force_Direction_Value);
+      direction    = Force_Direction_Value;
+      confidence   = 99.0;
+      signalSource = "FORCE";
+      // v2.4.1: respecter le timingMode API si signal recent (<300s),
+      // sinon fallback CLEAR. La gate Use_VPS_News_Protection decide ensuite.
+      if(g_Signal.is_valid && (TimeCurrent() - g_Signal.last_update) <= 300) {
+         timingMode = g_Signal.timing_mode;
+         Print("[FORCE-DIR] timingMode API conserve = ", timingMode,
+               " (Use_VPS_News_Protection=", (Use_VPS_News_Protection ? "true" : "false"), ")");
+      } else {
+         timingMode = "CLEAR";
+         Print("[FORCE-DIR] API stale, timingMode=CLEAR (fallback)");
+      }
+      sizeFactor   = Local_Size_Factor;
+      tpMode       = "NORMAL";
+      widerStops   = false;
+   } else {
+
+   // v2.4: news protection conditionnelle (Use_VPS_News_Protection=false -> on accepte
+   // les signaux meme en BLACKOUT, dangereux mais utile pour tests).
+   bool blackoutBlocks = Use_VPS_News_Protection;
+
    // PRIORITE 1 : Signal API fort (comportement identique a l'actuel)
    // 2026-04-15: Filtre directionnel assoupli — accepte toute direction != NONE
    // (l'ancien filtre bloquait SELL quand le VPS envoyait BUY en permanence).
    bool apiHasSignal = (g_Signal.is_valid &&
                         g_Signal.confidence >= Min_Confidence &&
                         (g_Signal.direction != "NONE") &&
-                        g_Signal.timing_mode != "BLACKOUT" &&
+                        (!blackoutBlocks || g_Signal.timing_mode != "BLACKOUT") &&
                         (TimeCurrent() - g_Signal.last_update) <= 300);
 
    if(apiHasSignal) {
@@ -1241,8 +1880,8 @@ void CheckEntry() {
    }
    // PRIORITE 2 : Mode local (quand API silencieuse, timing CLEAR)
    else if(Enable_Local_Mode) {
-      // Bloquer si BLACKOUT API (meme sans signal fort)
-      if(g_Signal.is_valid && g_Signal.timing_mode == "BLACKOUT")
+      // v2.4: BLACKOUT bloque LOCAL uniquement si protection news active
+      if(blackoutBlocks && g_Signal.is_valid && g_Signal.timing_mode == "BLACKOUT")
          REJECT("BLACKOUT API actif (mode LOCAL)");
 
       // Limiter les trades locaux journaliers
@@ -1277,16 +1916,20 @@ void CheckEntry() {
    else {
       REJECT("API muet et Enable_Local_Mode=false");
    }
+   } // v2.4: fin du else { ... } de Force_Direction_Override
 
    //================================================================
    // TIMING MODE GATE
    //================================================================
-   if(timingMode == "BLACKOUT")
-      REJECT("Timing BLACKOUT");
-   if(timingMode == "PRE_NEWS_SETUP"  && !Allow_PreNews_Trading)
-      REJECT("PRE_NEWS_SETUP non autorise");
-   if(timingMode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade)
-      REJECT("POST_NEWS_ENTRY non autorise");
+   // v2.4: BLACKOUT/PRE/POST gate uniquement si protection news active.
+   if(Use_VPS_News_Protection) {
+      if(timingMode == "BLACKOUT")
+         REJECT("Timing BLACKOUT");
+      if(timingMode == "PRE_NEWS_SETUP"  && !Allow_PreNews_Trading)
+         REJECT("PRE_NEWS_SETUP non autorise");
+      if(timingMode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade)
+         REJECT("POST_NEWS_ENTRY non autorise");
+   }
 
    //================================================================
    // CONFIDENCE GATE (API uniquement)
@@ -1301,6 +1944,16 @@ void CheckEntry() {
       REJECT("Direction invalide: " + direction);
 
    //================================================================
+   // ETAPE 3 (v2.4) - PREMIUM/DISCOUNT ARRAY FILTER
+   // Rejette tout setup hors zone D1 (BUY hors Discount / SELL hors Premium).
+   // Filtre binaire, evalue avant le pipeline CheckAllFilters et avant le
+   // conflict detector pour economiser des appels en aval.
+   //================================================================
+   if(Enable_Premium_Discount_Filter && !CheckPremiumDiscountFilter(direction)) {
+      REJECT("[PD-FILTER] Hors zone HTF (" + (direction == "BUY" ? "Discount" : "Premium") + ")");
+   }
+
+   //================================================================
    // CONFLICT DETECTOR (VPS macro vs ICT/LOCAL technical)
    // 2026-04-15: Si VPS dit BUY mais pipeline ICT/LOCAL dit SELL
    // (ou inverse), on accepte le trade en reduisant la taille.
@@ -1311,23 +1964,33 @@ void CheckEntry() {
    // plus tard (section DEAL v2) -> prend la contrainte la plus restrictive
    // sans les multiplier.
    //================================================================
+   // v2.4 (2026-04-25): bypass du filtre directionnel VPS via Use_VPS_Direction.
+   // Quand false, le VPS perd le pouvoir de bloquer/penaliser les signaux LOCAL/ICT.
+   // Le timing news (BLACKOUT/PRE/POST) reste actif si Use_VPS_News_Protection=true.
    bool signalConflict = false;
-   if(g_Signal.direction == "BUY"  && direction == "SELL") signalConflict = true;
-   if(g_Signal.direction == "SELL" && direction == "BUY")  signalConflict = true;
-
-   Print("[ENTRY] Direction ICT: ", direction,
-         " | VPS: ", g_Signal.direction,
-         " | Conflict: ", (signalConflict ? "YES" : "NO"));
-
    double conflictFactor = 1.0;
-   if(signalConflict) {
-      if(!Allow_Counter_Signal_Trading) {
-         REJECT("Allow_Counter=false | VPS=" + g_Signal.direction + " ICT=" + direction);
+
+   if(Use_VPS_Direction) {
+      if(g_Signal.direction == "BUY"  && direction == "SELL") signalConflict = true;
+      if(g_Signal.direction == "SELL" && direction == "BUY")  signalConflict = true;
+
+      Print("[ENTRY] Direction ICT: ", direction,
+            " | VPS: ", g_Signal.direction,
+            " | Conflict: ", (signalConflict ? "YES" : "NO"));
+
+      if(signalConflict) {
+         if(!Allow_Counter_Signal_Trading) {
+            REJECT("Allow_Counter=false | VPS=" + g_Signal.direction + " ICT=" + direction);
+         }
+         conflictFactor = 0.5;
+         Print("[CONFLICT] VPS=", g_Signal.direction,
+               " ICT=", direction,
+               " -> conflictFactor = 0.5 (combine via MIN avec DEAL)");
       }
-      conflictFactor = 0.5;
-      Print("[CONFLICT] VPS=", g_Signal.direction,
-            " ICT=", direction,
-            " -> conflictFactor = 0.5 (combine via MIN avec DEAL)");
+   } else {
+      // Bypass actif - LOCAL/ICT decide direction librement
+      Print("[VPS-BYPASS] Direction VPS ignoree (Use_VPS_Direction=false) ",
+            "| ICT=", direction, " | VPS=", g_Signal.direction);
    }
 
    //================================================================
@@ -1412,6 +2075,74 @@ void CheckEntry() {
       g_lastSweepDetected = g_LastSniper.sweep.sweepType +
                             DoubleToString(g_LastSniper.sweep.sweepPrice, 2);
       g_lastSweepTime     = TimeGMT();
+   }
+
+   //================================================================
+   // ETAPES 4-6 (v2.4) - HTF BONUSES BREAKDOWN
+   // Calcul des 3 bonus ICT/HTF (FVG H1, Breaker, Mitigation) en
+   // accumulation explicite, sans mutation in-place. Application unique
+   // a la fin avec cap 100. Logs centralises via [SCORE-V24] (commit 7).
+   //================================================================
+   int sniperBaseScore = g_LastSniper.score;  // score brut Sniper avant HTF
+
+   // -- ETAPE 4 : FVG H1
+   int         fvgH1Bonus = 0;
+   ICT_PDArray fvgH1;
+   if(Enable_FVG_H1 && g_ictH1 != NULL && DetectFVG_H1(direction, fvgH1)) {
+      fvgH1Bonus = Weight_FVG_H1;
+      Print("[FVG-H1-PASS] dir=", direction,
+            " zone=[", DoubleToString(fvgH1.zoneLow, _Digits),
+            "..", DoubleToString(fvgH1.zoneHigh, _Digits), "]",
+            " strength=", DoubleToString(fvgH1.strength, 0),
+            " bonus=+", fvgH1Bonus);
+   } else if(Enable_FVG_H1) {
+      Print("[FVG-H1-NONE] dir=", direction,
+            " | aucune FVG H1 ouverte trouvee (lookback=50 H1)");
+   }
+
+   // -- ETAPE 5 : Breaker Block
+   int         breakerBonus = 0;
+   ICT_PDArray breakerBlock;
+   if(Enable_Breaker_Block && DetectBreakerBlock(direction, breakerBlock)) {
+      breakerBonus = Weight_Breaker;
+      Print("[BREAKER-PASS] dir=", direction,
+            " zone=[", DoubleToString(breakerBlock.zoneLow, _Digits),
+            "..", DoubleToString(breakerBlock.zoneHigh, _Digits), "]",
+            " strength=", DoubleToString(breakerBlock.strength, 0),
+            " bonus=+", breakerBonus);
+   } else if(Enable_Breaker_Block) {
+      Print("[BREAKER-NONE] dir=", direction,
+            " | aucun Breaker Block en retest (lookback=80 M15)");
+   }
+
+   // -- ETAPE 6 : Mitigation Block
+   int         mitigBonus = 0;
+   ICT_PDArray mitigBlock;
+   if(Enable_Mitigation_Block && DetectMitigationBlock(direction, mitigBlock)) {
+      mitigBonus = Weight_Mitigation;
+      Print("[MITIG-PASS] dir=", direction,
+            " zone=[", DoubleToString(mitigBlock.zoneLow, _Digits),
+            "..", DoubleToString(mitigBlock.zoneHigh, _Digits), "]",
+            " strength=", DoubleToString(mitigBlock.strength, 0),
+            " bonus=+", mitigBonus);
+   } else if(Enable_Mitigation_Block) {
+      Print("[MITIG-NONE] dir=", direction,
+            " | aucun Mitigation Block intact en retest (lookback=80 M15)");
+   }
+
+   // -- Application centralisee (cap 100) + log breakdown unifie
+   int totalHTFBonus  = fvgH1Bonus + breakerBonus + mitigBonus;
+   g_LastSniper.score = (int)MathMin(100, sniperBaseScore + totalHTFBonus);
+
+   // v2.4.1 (audit P2-E): breakdown SCORE-V24 guarde par Log_Verbose.
+   if(Log_Verbose) {
+      Print("[SCORE-V24] dir=", direction,
+            " | base=", sniperBaseScore, "/100",
+            " | FVG_H1=+", fvgH1Bonus,
+            " Breaker=+", breakerBonus,
+            " Mitig=+", mitigBonus,
+            " | total_HTF=+", totalHTFBonus,
+            " | final=", g_LastSniper.score, "/100");
    }
 
    if(g_LastSniper.score < scoreThreshold)
@@ -1531,7 +2262,7 @@ void ExecuteTrade(string direction) {
 
    // CORRECTION 21: Validation SL — clamp within FTMO-safe range
    if(slPips < Sniper_SL_Min_Pips) slPips = Sniper_SL_Min_Pips;
-   if(slPips > Sniper_SL_Max_Pips) slPips = Sniper_SL_Max_Pips;
+   if(slPips > SL_Cap_Pips) slPips = SL_Cap_Pips;
 
    // Apply wider stops if indicated
    if(g_Signal.wider_stops) {
@@ -1550,7 +2281,7 @@ void ExecuteTrade(string direction) {
    // Clamp risk to safety cap
    double effectiveRisk = Risk_Percent;
    if(effectiveRisk <= 0) effectiveRisk = 1.0;
-   if(effectiveRisk > Max_Risk_Percent) effectiveRisk = Max_Risk_Percent;
+   if(effectiveRisk > Hard_Cap_Risk) effectiveRisk = Hard_Cap_Risk;
 
    double equity       = AccountInfoDouble(ACCOUNT_EQUITY);
    double tickValue    = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -1759,6 +2490,11 @@ void ExecuteTrade(string direction) {
    bool success = false;
    int deviations[] = {10, 30, 50};
 
+   // v2.4 (2026-04-25): set magic dynamiquement selon la direction (BUY ou SELL)
+   int execMagic = (direction == "BUY") ? Magic_Number_BUY : Magic_Number_SELL;
+   trade.SetExpertMagicNumber(execMagic);
+   Print("[MAGIC] Direction=", direction, " -> magic=", execMagic);
+
    for(int attempt = 0; attempt < 3 && !success; attempt++) {
       trade.SetDeviationInPoints(deviations[attempt]);
 
@@ -1791,6 +2527,8 @@ void ExecuteTrade(string direction) {
       g_InPosition = true;
       g_CurrentDirection = direction;
       g_TradesToday++;
+      // v2.4.1 (2026-04-25): horodate l'ouverture pour le throttle inter-trades
+      g_LastTradeTime = TimeCurrent();
 
       Print("TRADE OPENED - Ticket: ", g_Ticket);
 
@@ -1923,7 +2661,8 @@ void ClosePositionHandler() {
             if(dealTicket > 0) {
                // VÃ©rifier le magic number
                long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
-               if(dealMagic == Magic_Number) {
+               // v2.4: accepter BUY ou SELL magic
+               if(dealMagic == (long)Magic_Number_BUY || dealMagic == (long)Magic_Number_SELL) {
                   ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
                   if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_INOUT) {
                      profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
@@ -2201,7 +2940,8 @@ void SyncOpenPositions() {
       if(!PositionSelectByTicket(ticket)) continue;
 
       long magic = PositionGetInteger(POSITION_MAGIC);
-      if(magic != Magic_Number) continue;
+      // v2.4: accepter BUY ou SELL magic
+      if(magic != (long)Magic_Number_BUY && magic != (long)Magic_Number_SELL) continue;
 
       string sym = PositionGetString(POSITION_SYMBOL);
       if(sym != _Symbol) continue;
@@ -2262,16 +3002,18 @@ void RecalcDailyStats() {
       return;
    }
 
-   int    tradesCount = 0;
-   double totalPnL    = 0;
-   int    totalDeals  = HistoryDealsTotal();
+   int      tradesCount    = 0;
+   double   totalPnL       = 0;
+   datetime lastEntryTime  = 0;  // v2.4.1: dernier DEAL_ENTRY_IN du jour pour throttle
+   int      totalDeals     = HistoryDealsTotal();
 
    for(int i = 0; i < totalDeals; i++) {
       ulong dealTicket = HistoryDealGetTicket(i);
       if(dealTicket == 0) continue;
 
       long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
-      if(dealMagic != Magic_Number) continue;
+      // v2.4: accepter BUY ou SELL magic
+      if(dealMagic != (long)Magic_Number_BUY && dealMagic != (long)Magic_Number_SELL) continue;
 
       string dealSym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
       if(dealSym != _Symbol) continue;
@@ -2285,13 +3027,22 @@ void RecalcDailyStats() {
          totalPnL += HistoryDealGetDouble(dealTicket, DEAL_SWAP);
          totalPnL += HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
       }
+
+      // v2.4.1 (2026-04-25): tracer le dernier DEAL_ENTRY_IN pour persister
+      // g_LastTradeTime au restart EA (anti double-trade colle apres reboot).
+      if(dealEntry == DEAL_ENTRY_IN || dealEntry == DEAL_ENTRY_INOUT) {
+         datetime t = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+         if(t > lastEntryTime) lastEntryTime = t;
+      }
    }
 
    g_TradesToday = tradesCount;
    g_DailyPnL    = totalPnL;
+   if(lastEntryTime > 0) g_LastTradeTime = lastEntryTime;
 
    Print("[AUDIT-C5] Daily stats restored: trades=", tradesCount,
-         " PnL=", DoubleToString(totalPnL, 2));
+         " PnL=", DoubleToString(totalPnL, 2),
+         " | LastEntry=", (lastEntryTime > 0 ? TimeToString(lastEntryTime, TIME_DATE|TIME_MINUTES) : "none"));
 
    // AUDIT-C5: Sync Quality Filters daily counters if the method is available
    // (CQualityFilters does not expose SetDailyStats — counters are managed internally

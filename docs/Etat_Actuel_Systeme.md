@@ -7,6 +7,8 @@
 > **MAJ 2026-04-22 — v2.2 (EA Print label)** — intégration des garde-fous P2 (veto H4 structurel), P3 (DEAL-v2 reject threshold configurable) et des alertes SELL observationnelles. Voir [§4.9](#49--garde-fous-p2p3--alertes-sell-opportunity-ea-v22--2026-04-22).
 >
 > **MAJ 2026-04-23 — v2.3 (EA Print label)** — `EvaluateSellOpportunity` passe en mode **Sniper-gated** : un filtre LOCAL (H4+EMA) déclenche désormais **en plus** une validation Sniper M15 complète (sweep HIGH + BOS bearish + FVG/OB + score ≥ seuil) avant d'émettre une alerte. Motivé par l'analyse des 12 alertes du 23/04 (~85 % de signaux directionnels retardés non tradeables en mode LOCAL seul). Rollback via `SellAlert_Require_Sniper = false`. Voir [§4.9](#49--garde-fous-p2p3--alertes-sell-opportunity-ea-v22--2026-04-22).
+>
+> **MAJ 2026-04-25 — v2.4 (EA Print label)** — refonte directionnelle + 3 modules ICT additionnels. Le **filtre directionnel VPS est désactivé par défaut** (`Use_VPS_Direction = false`), libérant enfin les SELL après audit du biais BUY-only architectural (cf. mémoire phase 0). Ajout de 4 modules HTF en pipeline cumulatif : **Premium/Discount Filter** (binaire, étape 3), **FVG H1 bonus** (étape 4, +15 pts), **Breaker Block** (étape 5, +10 pts), **Mitigation Block** (étape 6, +5 pts). Magic_Number splitté en `Magic_Number_BUY` + `Magic_Number_SELL` pour stats par direction. Refactor scoring breakdown + WEEKLY-STATS log 7j. Tous les modules ICT v2.4 sont toggles (rollback non-destructif). Voir [§4.10](#410--v24--bypass-vps-direction--3-modules-ict-additionnels-2026-04-25).
 
 ---
 
@@ -522,6 +524,192 @@ Trois couches additionnelles au-dessus du scoring DEAL v2 (§4.7), déployées l
 | `[DEAL-v2]` | `GoldML_QualityFilters.mqh` | À chaque passage autorisé | (Existant avant v2.2) Score calculé, passage autorisé |
 
 > **Estimation post-refactor v2.3** : sur les 12 alertes `[SELL-OPPORTUNITY]` du 23/04/2026, le filtre Sniper aurait vraisemblablement validé **1-3 alertes** (celles correspondant à un vrai sweep HIGH + BOS bearish confirmé sur M15), les 9-11 autres tombant en `[SELL-SKIPPED-NO-SNIPER]`. Réduction attendue du bruit ≈ 75-90 %. À vérifier empiriquement sur 1 semaine post-déploiement.
+
+### 4.10 v2.4 — Bypass VPS direction + 3 modules ICT additionnels (2026-04-25)
+
+Branche `feat/v24-bypass-vps-add-ict-strategies` — 8 commits regroupant la libération SELL et 4 modules ICT/HTF en pipeline cumulatif.
+
+#### Motivation
+
+Audit phase 0 a confirmé un **biais BUY-only architectural** (VPS produit ~98 % de signaux BUY, 0 SELL en 14 jours, conflict detector pénalisait toute contre-direction LOCAL/ICT). v2.4 supprime cette contrainte par défaut tout en gardant la protection news FTMO, et compense la perte du veto VPS par 4 modules ICT/HTF qui re-qualifient les setups bidirectionnels.
+
+#### Inventaire des changements (commits 1-8)
+
+| # | Commit | Étape pipeline | Effet |
+|---|---|---|---|
+| 1 | `bf468a7` | — | Refonte 14 nouveaux inputs + renommages (Hard_Cap_Risk, SL_Cap_Pips, Trading_Session_*) + split `Magic_Number` → `Magic_Number_BUY=888892` + `Magic_Number_SELL=888893` |
+| 2 | `c7a1af5` | Direction Gate | `Use_VPS_Direction=false` (default) bypasse le conflict detector ; `Use_VPS_News_Protection=true` (default) garde BLACKOUT/PRE/POST ; `Force_Direction_Override` debug |
+| 3 | `ee61034` | **Étape 3** (filtre HTF) | Premium/Discount Array Filter binaire — BUY ⊆ Discount D1[1] (Bid ≤ médiane), SELL ⊆ Premium D1[1] (Bid ≥ médiane). Fail-open si D1 indispo. |
+| 4 | `50ee98e` | **Étape 4** (HTF bonus) | FVG H1 detection (lookback 50 bars, mitigated rejected) → bonus `+Weight_FVG_H1` (15) |
+| 5 | `45e6c49` | **Étape 5** (HTF bonus) | Breaker Block M15 (counter-direction violée + retest, lookback 80, body ≥ 0.3×ATR) → bonus `+Weight_Breaker` (10) |
+| 6 | `27f0c5d` | **Étape 6** (HTF bonus) | Mitigation Block M15 (same-direction intacte + retest, distinction nette vs Breaker) → bonus `+Weight_Mitigation` (5) |
+| 7 | `cca9edf` | scoring + telemetry | Refactor accumulation HTF explicite + log unifié `[SCORE-V24]` ; WEEKLY-STATS perf 7j toutes les 24h via OnTimer |
+| 8 | (ce commit) | doc + tag | MAJ §4.10 + tag `v2.4` |
+
+#### Pipeline `CheckEntry` après v2.4
+
+```
+1.  Force_Direction_Override (debug bypass)              ← v2.4 cmt 2
+2.  Direction selection : API > Local > London Range
+3.  Direction Gate (Use_VPS_Direction)                   ← v2.4 cmt 2
+4.  Premium/Discount Filter (étape 3)                    ← v2.4 cmt 3
+5.  Conflict Detector (gated par Use_VPS_Direction)
+6.  Quality Filters (P2/P3, DEAL v2 H4)
+7.  Sniper M15 AnalyzeEntry → score brut /100
+8.  FVG H1 bonus  (étape 4, +15)                         ← v2.4 cmt 4
+9.  Breaker bonus (étape 5, +10)                         ← v2.4 cmt 5
+10. Mitigation bonus (étape 6, +5)                       ← v2.4 cmt 6
+11. [SCORE-V24] log breakdown (cap 100)                  ← v2.4 cmt 7
+12. Score threshold check
+13. Hard gates (sweep / BOS / pullback)
+14. DEAL v2 size factor (MIN avec conflict)
+15. ExecuteTrade(direction, size)
+```
+
+#### Bonus HTF cumulatif
+
+Score Sniper de base /100 + jusqu'à `+30` HTF (15+10+5), capé à 100. Un setup avec FVG H1 ouverte + Breaker en retest + Mitigation intacte gagne le bonus maximum. Le bonus est appliqué **avant** le `scoreThreshold` check : un setup limite peut être sauvé par un contexte HTF favorable (philosophie ICT — HTF context renforce LTF setup).
+
+#### Logs structurés v2.4
+
+| Tag | Origine |
+|---|---|
+| `[VPS-BYPASS]` | Direction VPS ignorée (commit 2) |
+| `[FORCE-DIR]` | Override actif (commit 2) |
+| `[PD-FILTER-PASS]` / `[PD-FILTER-REJECT]` / `[PD-FILTER-DECISION]` | Premium/Discount HTF (commit 3) |
+| `[FVG-H1-PASS]` / `[FVG-H1-NONE]` / `[FVG-H1-MITIGATED]` | FVG H1 (commit 4) |
+| `[BREAKER-DETAIL]` / `[BREAKER-PASS]` / `[BREAKER-NONE]` | Breaker M15 (commit 5) |
+| `[MITIG-DETAIL]` / `[MITIG-PASS]` / `[MITIG-NONE]` | Mitigation M15 (commit 6) |
+| `[SCORE-V24]` | Breakdown unifié (commit 7) |
+| `[WEEKLY-STATS]` | Snapshot perf 7j (commit 7) |
+
+#### Inputs v2.4 (defaults)
+
+```
+// BYPASS / DEBUG
+Use_VPS_Direction              = false   // v2.3 implicite=true → biais BUY-only
+Use_VPS_News_Protection        = true    // FTMO safety, BLACKOUT/PRE/POST gardés
+Log_Verbose                    = false
+Use_Debug_Mode                 = false
+Force_Direction_Override       = false
+Force_Direction_Value          = "BUY"
+
+// ICT EXTENSIONS (toggles)
+Enable_Premium_Discount_Filter = true
+Enable_Breaker_Block           = true
+Enable_Mitigation_Block        = true
+Enable_FVG_H1                  = true
+
+// SCORING WEIGHTS HTF (v2.4.1 — uniquement les 3 reellement consommes)
+// Les 5 weights orphelins (Weight_Sweep / Weight_BOS / Weight_FVG_M5 /
+// Weight_OB / Weight_Fib_OTE) ont ete supprimes en v2.4.1 — voir §4.10.1.
+Weight_FVG_H1                  = 15      // ✅ actif commit 4
+Weight_Breaker                 = 10      // ✅ actif commit 5
+Weight_Mitigation              = 5       // ✅ actif commit 6
+
+// RISK / SESSION
+Hard_Cap_Risk                  = 1.5     // ex-Max_Risk_Percent (durci de 2.0)
+SL_Cap_Pips                    = 50      // ex-Sniper_SL_Max_Pips
+TradeThrottleSeconds           = 3600
+Skip_Rollover                  = true
+Trading_Session_Start          = "00:00" // ex-Session_Start
+Trading_Session_End            = "23:59" // ex-Session_End
+
+// MAGIC SPLIT
+Magic_Number_BUY               = 888892
+Magic_Number_SELL              = 888893
+```
+
+#### Rollback safety
+
+| Toggle | `false` → comportement |
+|---|---|
+| `Enable_FVG_H1` | retire bonus HTF FVG H1 |
+| `Enable_Breaker_Block` | retire bonus HTF Breaker |
+| `Enable_Mitigation_Block` | retire bonus HTF Mitigation |
+| `Enable_Premium_Discount_Filter` | retire le filtre HTF binaire (étape 3) |
+| `Use_VPS_Direction = true` | revient au comportement v2.3 (conflict detector actif, bias BUY si VPS pousse BUY) |
+| `Use_VPS_News_Protection = false` | retire BLACKOUT/PRE/POST (à utiliser uniquement en démo) |
+
+Note : aucun changement runtime sans toggle utilisateur. Compilation v2.4 sur les 4 commits 1-3 vérifiée 0 erreur (checkpoint 2026-04-25).
+
+#### Limites connues v2.4
+
+- `Weight_Sweep` / `Weight_BOS` / `Weight_FVG_M5` / `Weight_OB` / `Weight_Fib_OTE` restent **hardcodés** dans `CSniperM15::CalculateScore` (`GoldML_SniperEntry_M15.mqh`). **Action v2.4.1** : ces 5 inputs orphelins ont été **supprimés** du `.mq5` (cf §4.10.1) — refactor propre + exposition via inputs reporté à **v2.5** avec backtest avant/après.
+- WEEKLY-STATS premier log ~60 s après EA start (`g_LastWeeklyStatsTime=0`), ensuite throttle 24 h. Donne 0 trades en démo fraîche tant qu'aucun deal fermé sur les magics BUY/SELL n'est dans l'historique.
+
+### 4.10.1 v2.4.1 — Corrections audit (2026-04-25)
+
+PR de cleanup post-audit `audit_v24_coherence_performance.md` (verdict
+"READY WITH WARNINGS"). 5 corrections, 1 commit chacune, push après
+chaque commit. Aucun changement de logique de trading, uniquement
+câblage d'inputs orphelins + hygiène de scoring.
+
+#### Corrections appliquées
+
+| # | Correction | Audit ref | Effet |
+|---|-----------|-----------|-------|
+| 1 | Câbler `TradeThrottleSeconds` | §6 + §11 P2-A | Throttle inter-trades effectif (default 1h). Persistance restart EA via `RecalcDailyStats`. |
+| 2 | `Force_Direction_Override` respecte la protection news | §6 + §11 P2-B | `timingMode` n'est plus hardcodé `CLEAR` ; reprend `g_Signal.timing_mode` si API <300s. La gate `Use_VPS_News_Protection` redevient effective en mode debug. |
+| 3 | Suppression de 5 weights orphelins (**Option C**) | §1 + §11 P2-D | `Weight_Sweep`, `Weight_BOS`, `Weight_FVG_M5`, `Weight_OB`, `Weight_Fib_OTE` retirés du `.mq5`. Conservés : `Weight_FVG_H1`, `Weight_Breaker`, `Weight_Mitigation` (les 3 réellement câblés). |
+| 4 | Câbler 3 inputs cosmétiques | §1 + §11 P2-E | `Log_Verbose` guarde DIAGNOSTIC heartbeat 60s + breakdown `[SCORE-V24]`. `Use_Debug_Mode` ajoute trace `[DEBUG]` pré-signal. `Skip_Rollover` bloque trades 22:00-23:00 GMT. |
+| 5 | Documentation §4.10 (ce paragraphe) | §10 + §11 P2-C | Note explicite sur les inputs orphelins supprimés + plan v2.5. |
+
+#### Note Option C — pourquoi supprimer plutôt qu'exposer
+
+Le scoring Sniper interne (`CSniperM15::CalculateScore` dans
+`GoldML_SniperEntry_M15.mqh`) n'est **pas une simple combinaison
+linéaire de 5 poids**. Il contient :
+
+- plusieurs variantes par type de sweep (PWH/PWL/PDH/PDL/EQ-highs/EQ-lows
+  + recent + displacement)
+- un score OB conditionné par direction et par distance
+- un fallback Fib OTE de +20 quand le pullback est dans la zone
+- des bonus M5 (CHoCH-M5, BOS-M5, structure align M5, session)
+
+Une exposition naïve de 5 weights aurait donné **l'illusion de contrôle**
+sans correspondre à la réalité du calcul. Plutôt que créer un faux fix
+(Option A) ou bloquer v2.4.1 sur un refactor lourd estimé 6-8h
++ backtest (Option B), v2.4.1 retire les 5 inputs orphelins et planifie
+le travail propre :
+
+> **v2.5** inclura un refactor de `CalculateScore` exposant des poids
+> représentatifs du calcul réel, accompagné d'un **backtest avant/après**
+> sur historique XAUUSD pour valider la nouvelle paramétrisation.
+
+#### Comportement runtime des 4 nouveaux câblages
+
+```
+TradeThrottleSeconds=3600
+  → REJECT "Throttle inter-trades Xs/3600s" si elapsed < 3600
+  → 0 = throttle desactive
+
+Skip_Rollover=true
+  → REJECT "Skip_Rollover (fenetre 22:00-23:00 GMT, spread anormal)"
+    si TimeCurrent().hour == 22
+
+Log_Verbose=true
+  → DIAGNOSTIC 60s + [SCORE-V24] breakdown actifs
+Log_Verbose=false
+  → DIAGNOSTIC + [SCORE-V24] supprimes (REJECT/TRADE OPENED restent)
+
+Use_Debug_Mode=true
+  → trace [DEBUG] CheckEntry pre-signal a chaque appel CheckEntry
+Use_Debug_Mode=false (default)
+  → aucune trace additionnelle
+```
+
+#### Rollback v2.4.1 → v2.4
+
+| Toggle | Valeur | Effet rollback |
+|---|---|---|
+| `TradeThrottleSeconds` | `0` | Désactive le throttle (comportement v2.4) |
+| `Skip_Rollover` | `false` | Désactive le check 22:00-23:00 GMT |
+| `Log_Verbose` | `true` | DIAGNOSTIC + SCORE-V24 actifs (logs v2.4 identiques) |
+| `Use_Debug_Mode` | `false` | Pas de trace [DEBUG] |
+
+Note : `Force_Direction_Override` n'a pas de rollback — la correction du
+bypass news est un correctif de sécurité.
 
 ---
 
