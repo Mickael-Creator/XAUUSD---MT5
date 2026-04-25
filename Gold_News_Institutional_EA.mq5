@@ -1509,6 +1509,152 @@ bool DetectBreakerBlock(string direction, ICT_PDArray &outBreaker) {
 }
 
 //+------------------------------------------------------------------+
+//| v2.4 MITIGATION BLOCK DETECTION (2026-04-25)                      |
+//+------------------------------------------------------------------+
+// Detecte un Mitigation Block M15 dans le sens du trade.
+//
+// Definition ICT (et distinction vs Breaker) :
+//   Bullish Mitigation = bullish OB (same-direction, up-candle) intacte —
+//   jamais violee a la baisse depuis sa creation — et actuellement en
+//   retest. Signal ICT de continuation : la zone d origine a tenu, le
+//   prix revient mitiger l imbalance puis devrait poursuivre haut.
+//   Bearish Mitigation = mirror.
+//
+//   vs Breaker (commit 5) : le Breaker est une OB COUNTER-direction VIOLEE
+//   qui flippe sa polarite. La Mitigation est une OB SAME-direction INTACTE.
+//
+// Algorithme (M15, lookback 80 bars) :
+//   1. Scanner les bougies pour trouver un OB candidate dans le sens du
+//      trade (bullish pour BUY, bearish pour SELL) avec body >= 0.3 * ATR
+//   2. Verifier que la zone N A PAS ete violee depuis sa creation
+//      (aucun close < zoneLow pour BUY, aucun close > zoneHigh pour SELL)
+//   3. Verifier que le bid actuel est dans la zone (retest actif)
+//
+// Strength : body/ATR * 30 (cap 100), meme normalisation que les autres.
+//+------------------------------------------------------------------+
+bool DetectMitigationBlock(string direction, ICT_PDArray &outMitig) {
+   outMitig.found      = false;
+   outMitig.type       = ICT_PD_NONE;
+   outMitig.name       = "NONE";
+   outMitig.zoneHigh   = 0;
+   outMitig.zoneLow    = 0;
+   outMitig.createdBar = -1;
+   outMitig.strength   = 0;
+
+   const int lookback = 80;
+   const int bars     = lookback + 5;
+
+   double   open_M15[];
+   double   close_M15[];
+   double   high_M15[];
+   double   low_M15[];
+   datetime time_M15[];
+
+   ArraySetAsSeries(open_M15,  true);
+   ArraySetAsSeries(close_M15, true);
+   ArraySetAsSeries(high_M15,  true);
+   ArraySetAsSeries(low_M15,   true);
+   ArraySetAsSeries(time_M15,  true);
+
+   if(CopyOpen (_Symbol, PERIOD_M15, 0, bars, open_M15)  <= 0) return false;
+   if(CopyClose(_Symbol, PERIOD_M15, 0, bars, close_M15) <= 0) return false;
+   if(CopyHigh (_Symbol, PERIOD_M15, 0, bars, high_M15)  <= 0) return false;
+   if(CopyLow  (_Symbol, PERIOD_M15, 0, bars, low_M15)   <= 0) return false;
+   if(CopyTime (_Symbol, PERIOD_M15, 0, bars, time_M15)  <= 0) return false;
+
+   double atr = 0.0;
+   if(g_hLocalATR != INVALID_HANDLE) {
+      double atrBuf[];
+      if(CopyBuffer(g_hLocalATR, 0, 0, 3, atrBuf) >= 3) {
+         atr = atrBuf[1];
+      }
+   }
+   if(atr <= 0.0) {
+      Print("[MITIG] WARNING: ATR M15 indisponible - detection skipped");
+      return false;
+   }
+
+   const double minBody = 0.3 * atr;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   int n      = ArraySize(close_M15);
+   int maxIdx = MathMin(lookback, n - 2);
+
+   // Scan recent -> ancien. On commence a i=3 (laisse place au retest).
+   for(int i = 3; i <= maxIdx; i++) {
+      double body = MathAbs(close_M15[i] - open_M15[i]);
+      if(body < minBody) continue;
+
+      bool isBull = (close_M15[i] > open_M15[i]);
+      bool isBear = (close_M15[i] < open_M15[i]);
+
+      double zoneHigh = high_M15[i];
+      double zoneLow  = low_M15[i];
+
+      if(direction == "BUY" && isBull) {
+         // Verifier zone preservee : aucun close < zoneLow entre i-1 et 1
+         bool violated = false;
+         for(int j = i - 1; j >= 1; j--) {
+            if(close_M15[j] < zoneLow) {
+               violated = true;
+               break;
+            }
+         }
+         if(violated) continue;
+
+         if(bid >= zoneLow && bid <= zoneHigh) {
+            outMitig.found       = true;
+            outMitig.type        = ICT_PD_OB;
+            outMitig.zoneHigh    = zoneHigh;
+            outMitig.zoneLow     = zoneLow;
+            outMitig.createdBar  = i;
+            outMitig.createdTime = time_M15[i];
+            outMitig.strength    = MathMin(100.0, (body / atr) * 30.0);
+            outMitig.name        = "MITIGATION";
+
+            Print("[MITIG-DETAIL] dir=BUY OB_bar=", i,
+                  " zone=[", DoubleToString(zoneLow, _Digits),
+                  "..", DoubleToString(zoneHigh, _Digits), "]",
+                  " body/ATR=", DoubleToString(body / atr, 2),
+                  " bid=", DoubleToString(bid, _Digits), " (in_zone, intact)");
+            return true;
+         }
+      }
+      else if(direction == "SELL" && isBear) {
+         // Verifier zone preservee : aucun close > zoneHigh entre i-1 et 1
+         bool violated = false;
+         for(int j = i - 1; j >= 1; j--) {
+            if(close_M15[j] > zoneHigh) {
+               violated = true;
+               break;
+            }
+         }
+         if(violated) continue;
+
+         if(bid >= zoneLow && bid <= zoneHigh) {
+            outMitig.found       = true;
+            outMitig.type        = ICT_PD_OB;
+            outMitig.zoneHigh    = zoneHigh;
+            outMitig.zoneLow     = zoneLow;
+            outMitig.createdBar  = i;
+            outMitig.createdTime = time_M15[i];
+            outMitig.strength    = MathMin(100.0, (body / atr) * 30.0);
+            outMitig.name        = "MITIGATION";
+
+            Print("[MITIG-DETAIL] dir=SELL OB_bar=", i,
+                  " zone=[", DoubleToString(zoneLow, _Digits),
+                  "..", DoubleToString(zoneHigh, _Digits), "]",
+                  " body/ATR=", DoubleToString(body / atr, 2),
+                  " bid=", DoubleToString(bid, _Digits), " (in_zone, intact)");
+            return true;
+         }
+      }
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| CHECK ENTRY CONDITIONS (Dual-mode: API + Local)                   |
 //+------------------------------------------------------------------+
 void CheckEntry() {
@@ -1822,6 +1968,30 @@ void CheckEntry() {
    } else if(Enable_Breaker_Block) {
       Print("[BREAKER-NONE] dir=", direction,
             " | aucun Breaker Block en retest (lookback=80 M15)");
+   }
+
+   //================================================================
+   // ETAPE 6 (v2.4) - MITIGATION BLOCK BONUS (ICT continuation intact)
+   // Une OB same-direction intacte (jamais violee) en retest. Distinction
+   // vs Breaker : Breaker = OB counter violee qui flippe ; Mitigation =
+   // OB same intacte qui confirme la continuation. Bonus Weight_Mitigation
+   // (default 5). Cumulatif avec FVG H1 + Breaker, score cape a 100.
+   //================================================================
+   int mitigBonus = 0;
+   ICT_PDArray mitigBlock;
+   if(Enable_Mitigation_Block && DetectMitigationBlock(direction, mitigBlock)) {
+      mitigBonus = Weight_Mitigation;
+      int scoreBefore = g_LastSniper.score;
+      g_LastSniper.score = (int)MathMin(100, scoreBefore + mitigBonus);
+      Print("[MITIG-PASS] dir=", direction,
+            " zone=[", DoubleToString(mitigBlock.zoneLow, _Digits),
+            "..", DoubleToString(mitigBlock.zoneHigh, _Digits), "]",
+            " strength=", DoubleToString(mitigBlock.strength, 0),
+            " bonus=+", mitigBonus,
+            " | score: ", scoreBefore, " -> ", g_LastSniper.score);
+   } else if(Enable_Mitigation_Block) {
+      Print("[MITIG-NONE] dir=", direction,
+            " | aucun Mitigation Block intact en retest (lookback=80 M15)");
    }
 
    if(g_LastSniper.score < scoreThreshold)
