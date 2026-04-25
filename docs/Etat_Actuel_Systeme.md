@@ -600,15 +600,12 @@ Enable_Breaker_Block           = true
 Enable_Mitigation_Block        = true
 Enable_FVG_H1                  = true
 
-// SCORING WEIGHTS (étapes 4-6 actives ; les 5 autres restent hardcodés Sniper)
-Weight_Sweep                   = 30      // hardcodé Sniper (v2.5 refactor planifié)
-Weight_BOS                     = 20      // hardcodé Sniper
+// SCORING WEIGHTS HTF (v2.4.1 — uniquement les 3 reellement consommes)
+// Les 5 weights orphelins (Weight_Sweep / Weight_BOS / Weight_FVG_M5 /
+// Weight_OB / Weight_Fib_OTE) ont ete supprimes en v2.4.1 — voir §4.10.1.
 Weight_FVG_H1                  = 15      // ✅ actif commit 4
-Weight_FVG_M5                  = 10      // hardcodé Sniper (+5)
-Weight_OB                      = 8       // hardcodé Sniper (+5)
 Weight_Breaker                 = 10      // ✅ actif commit 5
 Weight_Mitigation              = 5       // ✅ actif commit 6
-Weight_Fib_OTE                 = 7       // hardcodé Sniper (OTE fallback +20)
 
 // RISK / SESSION
 Hard_Cap_Risk                  = 1.5     // ex-Max_Risk_Percent (durci de 2.0)
@@ -638,8 +635,81 @@ Note : aucun changement runtime sans toggle utilisateur. Compilation v2.4 sur le
 
 #### Limites connues v2.4
 
-- `Weight_Sweep` / `Weight_BOS` / `Weight_FVG_M5` / `Weight_OB` / `Weight_Fib_OTE` restent **hardcodés** dans `CSniperM15::CalculateScore` (`GoldML_SniperEntry_M15.mqh`). Leur exposition via les inputs v2.4 nécessite un refactor du Sniper, reporté à **v2.5** (toucherait le `.mqh`, hors-périmètre v2.4).
+- `Weight_Sweep` / `Weight_BOS` / `Weight_FVG_M5` / `Weight_OB` / `Weight_Fib_OTE` restent **hardcodés** dans `CSniperM15::CalculateScore` (`GoldML_SniperEntry_M15.mqh`). **Action v2.4.1** : ces 5 inputs orphelins ont été **supprimés** du `.mq5` (cf §4.10.1) — refactor propre + exposition via inputs reporté à **v2.5** avec backtest avant/après.
 - WEEKLY-STATS premier log ~60 s après EA start (`g_LastWeeklyStatsTime=0`), ensuite throttle 24 h. Donne 0 trades en démo fraîche tant qu'aucun deal fermé sur les magics BUY/SELL n'est dans l'historique.
+
+### 4.10.1 v2.4.1 — Corrections audit (2026-04-25)
+
+PR de cleanup post-audit `audit_v24_coherence_performance.md` (verdict
+"READY WITH WARNINGS"). 5 corrections, 1 commit chacune, push après
+chaque commit. Aucun changement de logique de trading, uniquement
+câblage d'inputs orphelins + hygiène de scoring.
+
+#### Corrections appliquées
+
+| # | Correction | Audit ref | Effet |
+|---|-----------|-----------|-------|
+| 1 | Câbler `TradeThrottleSeconds` | §6 + §11 P2-A | Throttle inter-trades effectif (default 1h). Persistance restart EA via `RecalcDailyStats`. |
+| 2 | `Force_Direction_Override` respecte la protection news | §6 + §11 P2-B | `timingMode` n'est plus hardcodé `CLEAR` ; reprend `g_Signal.timing_mode` si API <300s. La gate `Use_VPS_News_Protection` redevient effective en mode debug. |
+| 3 | Suppression de 5 weights orphelins (**Option C**) | §1 + §11 P2-D | `Weight_Sweep`, `Weight_BOS`, `Weight_FVG_M5`, `Weight_OB`, `Weight_Fib_OTE` retirés du `.mq5`. Conservés : `Weight_FVG_H1`, `Weight_Breaker`, `Weight_Mitigation` (les 3 réellement câblés). |
+| 4 | Câbler 3 inputs cosmétiques | §1 + §11 P2-E | `Log_Verbose` guarde DIAGNOSTIC heartbeat 60s + breakdown `[SCORE-V24]`. `Use_Debug_Mode` ajoute trace `[DEBUG]` pré-signal. `Skip_Rollover` bloque trades 22:00-23:00 GMT. |
+| 5 | Documentation §4.10 (ce paragraphe) | §10 + §11 P2-C | Note explicite sur les inputs orphelins supprimés + plan v2.5. |
+
+#### Note Option C — pourquoi supprimer plutôt qu'exposer
+
+Le scoring Sniper interne (`CSniperM15::CalculateScore` dans
+`GoldML_SniperEntry_M15.mqh`) n'est **pas une simple combinaison
+linéaire de 5 poids**. Il contient :
+
+- plusieurs variantes par type de sweep (PWH/PWL/PDH/PDL/EQ-highs/EQ-lows
+  + recent + displacement)
+- un score OB conditionné par direction et par distance
+- un fallback Fib OTE de +20 quand le pullback est dans la zone
+- des bonus M5 (CHoCH-M5, BOS-M5, structure align M5, session)
+
+Une exposition naïve de 5 weights aurait donné **l'illusion de contrôle**
+sans correspondre à la réalité du calcul. Plutôt que créer un faux fix
+(Option A) ou bloquer v2.4.1 sur un refactor lourd estimé 6-8h
++ backtest (Option B), v2.4.1 retire les 5 inputs orphelins et planifie
+le travail propre :
+
+> **v2.5** inclura un refactor de `CalculateScore` exposant des poids
+> représentatifs du calcul réel, accompagné d'un **backtest avant/après**
+> sur historique XAUUSD pour valider la nouvelle paramétrisation.
+
+#### Comportement runtime des 4 nouveaux câblages
+
+```
+TradeThrottleSeconds=3600
+  → REJECT "Throttle inter-trades Xs/3600s" si elapsed < 3600
+  → 0 = throttle desactive
+
+Skip_Rollover=true
+  → REJECT "Skip_Rollover (fenetre 22:00-23:00 GMT, spread anormal)"
+    si TimeCurrent().hour == 22
+
+Log_Verbose=true
+  → DIAGNOSTIC 60s + [SCORE-V24] breakdown actifs
+Log_Verbose=false
+  → DIAGNOSTIC + [SCORE-V24] supprimes (REJECT/TRADE OPENED restent)
+
+Use_Debug_Mode=true
+  → trace [DEBUG] CheckEntry pre-signal a chaque appel CheckEntry
+Use_Debug_Mode=false (default)
+  → aucune trace additionnelle
+```
+
+#### Rollback v2.4.1 → v2.4
+
+| Toggle | Valeur | Effet rollback |
+|---|---|---|
+| `TradeThrottleSeconds` | `0` | Désactive le throttle (comportement v2.4) |
+| `Skip_Rollover` | `false` | Désactive le check 22:00-23:00 GMT |
+| `Log_Verbose` | `true` | DIAGNOSTIC + SCORE-V24 actifs (logs v2.4 identiques) |
+| `Use_Debug_Mode` | `false` | Pas de trace [DEBUG] |
+
+Note : `Force_Direction_Override` n'a pas de rollback — la correction du
+bypass news est un correctif de sécurité.
 
 ---
 
