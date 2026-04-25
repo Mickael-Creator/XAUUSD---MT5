@@ -1277,13 +1277,31 @@ void CheckEntry() {
    string tpMode;
    bool   widerStops;
 
+   // v2.4 (2026-04-25): Force_Direction_Override (debug uniquement) - bypass complet
+   // du pipeline de selection de direction. Utilisation : tests manuels en demo.
+   if(Force_Direction_Override &&
+      (Force_Direction_Value == "BUY" || Force_Direction_Value == "SELL")) {
+      Print("[FORCE-DIR] Override actif - direction forcee a ", Force_Direction_Value);
+      direction    = Force_Direction_Value;
+      confidence   = 99.0;
+      signalSource = "FORCE";
+      timingMode   = "CLEAR";
+      sizeFactor   = Local_Size_Factor;
+      tpMode       = "NORMAL";
+      widerStops   = false;
+   } else {
+
+   // v2.4: news protection conditionnelle (Use_VPS_News_Protection=false -> on accepte
+   // les signaux meme en BLACKOUT, dangereux mais utile pour tests).
+   bool blackoutBlocks = Use_VPS_News_Protection;
+
    // PRIORITE 1 : Signal API fort (comportement identique a l'actuel)
    // 2026-04-15: Filtre directionnel assoupli — accepte toute direction != NONE
    // (l'ancien filtre bloquait SELL quand le VPS envoyait BUY en permanence).
    bool apiHasSignal = (g_Signal.is_valid &&
                         g_Signal.confidence >= Min_Confidence &&
                         (g_Signal.direction != "NONE") &&
-                        g_Signal.timing_mode != "BLACKOUT" &&
+                        (!blackoutBlocks || g_Signal.timing_mode != "BLACKOUT") &&
                         (TimeCurrent() - g_Signal.last_update) <= 300);
 
    if(apiHasSignal) {
@@ -1297,8 +1315,8 @@ void CheckEntry() {
    }
    // PRIORITE 2 : Mode local (quand API silencieuse, timing CLEAR)
    else if(Enable_Local_Mode) {
-      // Bloquer si BLACKOUT API (meme sans signal fort)
-      if(g_Signal.is_valid && g_Signal.timing_mode == "BLACKOUT")
+      // v2.4: BLACKOUT bloque LOCAL uniquement si protection news active
+      if(blackoutBlocks && g_Signal.is_valid && g_Signal.timing_mode == "BLACKOUT")
          REJECT("BLACKOUT API actif (mode LOCAL)");
 
       // Limiter les trades locaux journaliers
@@ -1333,16 +1351,20 @@ void CheckEntry() {
    else {
       REJECT("API muet et Enable_Local_Mode=false");
    }
+   } // v2.4: fin du else { ... } de Force_Direction_Override
 
    //================================================================
    // TIMING MODE GATE
    //================================================================
-   if(timingMode == "BLACKOUT")
-      REJECT("Timing BLACKOUT");
-   if(timingMode == "PRE_NEWS_SETUP"  && !Allow_PreNews_Trading)
-      REJECT("PRE_NEWS_SETUP non autorise");
-   if(timingMode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade)
-      REJECT("POST_NEWS_ENTRY non autorise");
+   // v2.4: BLACKOUT/PRE/POST gate uniquement si protection news active.
+   if(Use_VPS_News_Protection) {
+      if(timingMode == "BLACKOUT")
+         REJECT("Timing BLACKOUT");
+      if(timingMode == "PRE_NEWS_SETUP"  && !Allow_PreNews_Trading)
+         REJECT("PRE_NEWS_SETUP non autorise");
+      if(timingMode == "POST_NEWS_ENTRY" && !Allow_PostNews_Fade)
+         REJECT("POST_NEWS_ENTRY non autorise");
+   }
 
    //================================================================
    // CONFIDENCE GATE (API uniquement)
@@ -1367,23 +1389,33 @@ void CheckEntry() {
    // plus tard (section DEAL v2) -> prend la contrainte la plus restrictive
    // sans les multiplier.
    //================================================================
+   // v2.4 (2026-04-25): bypass du filtre directionnel VPS via Use_VPS_Direction.
+   // Quand false, le VPS perd le pouvoir de bloquer/penaliser les signaux LOCAL/ICT.
+   // Le timing news (BLACKOUT/PRE/POST) reste actif si Use_VPS_News_Protection=true.
    bool signalConflict = false;
-   if(g_Signal.direction == "BUY"  && direction == "SELL") signalConflict = true;
-   if(g_Signal.direction == "SELL" && direction == "BUY")  signalConflict = true;
-
-   Print("[ENTRY] Direction ICT: ", direction,
-         " | VPS: ", g_Signal.direction,
-         " | Conflict: ", (signalConflict ? "YES" : "NO"));
-
    double conflictFactor = 1.0;
-   if(signalConflict) {
-      if(!Allow_Counter_Signal_Trading) {
-         REJECT("Allow_Counter=false | VPS=" + g_Signal.direction + " ICT=" + direction);
+
+   if(Use_VPS_Direction) {
+      if(g_Signal.direction == "BUY"  && direction == "SELL") signalConflict = true;
+      if(g_Signal.direction == "SELL" && direction == "BUY")  signalConflict = true;
+
+      Print("[ENTRY] Direction ICT: ", direction,
+            " | VPS: ", g_Signal.direction,
+            " | Conflict: ", (signalConflict ? "YES" : "NO"));
+
+      if(signalConflict) {
+         if(!Allow_Counter_Signal_Trading) {
+            REJECT("Allow_Counter=false | VPS=" + g_Signal.direction + " ICT=" + direction);
+         }
+         conflictFactor = 0.5;
+         Print("[CONFLICT] VPS=", g_Signal.direction,
+               " ICT=", direction,
+               " -> conflictFactor = 0.5 (combine via MIN avec DEAL)");
       }
-      conflictFactor = 0.5;
-      Print("[CONFLICT] VPS=", g_Signal.direction,
-            " ICT=", direction,
-            " -> conflictFactor = 0.5 (combine via MIN avec DEAL)");
+   } else {
+      // Bypass actif - LOCAL/ICT decide direction librement
+      Print("[VPS-BYPASS] Direction VPS ignoree (Use_VPS_Direction=false) ",
+            "| ICT=", direction, " | VPS=", g_Signal.direction);
    }
 
    //================================================================
