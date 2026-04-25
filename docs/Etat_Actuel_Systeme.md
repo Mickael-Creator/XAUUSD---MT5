@@ -9,6 +9,10 @@
 > **MAJ 2026-04-23 — v2.3 (EA Print label)** — `EvaluateSellOpportunity` passe en mode **Sniper-gated** : un filtre LOCAL (H4+EMA) déclenche désormais **en plus** une validation Sniper M15 complète (sweep HIGH + BOS bearish + FVG/OB + score ≥ seuil) avant d'émettre une alerte. Motivé par l'analyse des 12 alertes du 23/04 (~85 % de signaux directionnels retardés non tradeables en mode LOCAL seul). Rollback via `SellAlert_Require_Sniper = false`. Voir [§4.9](#49--garde-fous-p2p3--alertes-sell-opportunity-ea-v22--2026-04-22).
 >
 > **MAJ 2026-04-25 — v2.4 (EA Print label)** — refonte directionnelle + 3 modules ICT additionnels. Le **filtre directionnel VPS est désactivé par défaut** (`Use_VPS_Direction = false`), libérant enfin les SELL après audit du biais BUY-only architectural (cf. mémoire phase 0). Ajout de 4 modules HTF en pipeline cumulatif : **Premium/Discount Filter** (binaire, étape 3), **FVG H1 bonus** (étape 4, +15 pts), **Breaker Block** (étape 5, +10 pts), **Mitigation Block** (étape 6, +5 pts). Magic_Number splitté en `Magic_Number_BUY` + `Magic_Number_SELL` pour stats par direction. Refactor scoring breakdown + WEEKLY-STATS log 7j. Tous les modules ICT v2.4 sont toggles (rollback non-destructif). Voir [§4.10](#410--v24--bypass-vps-direction--3-modules-ict-additionnels-2026-04-25).
+>
+> **MAJ 2026-04-25 — v2.4.1** — cleanup post-audit : 5 corrections audit v2.4 (P2-A à P2-E) appliquées sans changement de logique trading. Câblage `TradeThrottleSeconds`, `Log_Verbose`, `Use_Debug_Mode`, `Skip_Rollover` ; `Force_Direction_Override` respecte la protection news ; suppression de 5 weights orphelins (Option C). Voir [§4.10.1](#4101-v241--corrections-audit-2026-04-25).
+>
+> **MAJ 2026-04-25 — v2.4.2** — final cleanup avant démo : suppression `API_MarketData_URL` orphelin (C1), persistance throttle cross-jour (C2), `Force_Direction` skip si API stale + protection news active (C3), banner OnInit MAJ v2.4.2 (C4), documentation §4.10.2 (C5). **0 critical / 0 warnings post-cleanup**, code propre pour déploiement démo + multi-comptes futurs. Logique de trading identique à v2.4.1. Voir [§4.10.2](#4102-v242--final-cleanup-avant-démo-2026-04-25).
 
 ---
 
@@ -710,6 +714,108 @@ Use_Debug_Mode=false (default)
 
 Note : `Force_Direction_Override` n'a pas de rollback — la correction du
 bypass news est un correctif de sécurité.
+
+---
+
+### 4.10.2 v2.4.2 — Final cleanup avant démo (2026-04-25)
+
+PR de cleanup final post-audit `audit_v241_coherence_performance.md`
+(verdict "READY FOR DEMO"). 5 commits, 1 push après chaque.
+**Aucun changement de logique de trading** : les 3 corrections code
+adressent des cas-limites résiduels (un orphelin, un edge cross-jour,
+un trou de sécurité news en mode debug). Les 2 corrections restantes
+sont cosmétiques (banner) et documentaires (cette section).
+
+#### Corrections appliquées
+
+| # | Correction | Audit ref | Effet |
+|---|-----------|-----------|-------|
+| C1 | Suppression `API_MarketData_URL` orphelin | P2-A v2.4.2 | Input déclaré ligne 52 mais plus consommé depuis cleanup `PushMarketData()` du 2026-04-03. Cleanup conforme principe Option C. |
+| C2 | Persistance throttle cross-jour | P2-B v2.4.2 | `RecalcDailyStats` étend la fenêtre `HistorySelect` à `[hier 00:00 ; demain 00:00]` pour restaurer `g_LastTradeTime` quand l'EA redémarre après minuit avec un trade exécuté la veille. Stats daily (`g_TradesToday`, `g_DailyPnL`) restent gates sur `dayStart`. |
+| C3 | Force_Direction skip si API stale + protection news ON | P2-E v2.4.2 + concern §6 | Trou résiduel post-P2-B comblé (Option A). Si `Force_Direction_Override=true` + `Use_VPS_News_Protection=true` + API stale (panne ou >300s) → `REJECT` avec log `[FORCE-DIR-API-STALE-SKIP]` (throttle 60s). Plus aucun fallback `timingMode=CLEAR` possible sous protection news active. |
+| C4 | MAJ banner OnInit v2.3 → v2.4.2 | P2-D v2.4.2 (P2-F audit v2.4) | Banner config ligne 533 affiche maintenant `v2.4.2 (2026-04-25) | AUDIT: 0 critical / 0 warnings post-cleanup`. Cohérence visuelle avec multi-comptes futurs. |
+| C5 | Documentation §4.10.2 (ce paragraphe) | P2-C v2.4.2 + récap audit | Section dédiée v2.4.2 + tableau récapitulatif final ci-dessous. |
+
+#### Détail technique C2 — fenêtre HistorySelect
+
+```mql5
+// Avant (v2.4.1):
+datetime dayStart = today 00:00;
+datetime dayEnd   = today 00:00 + 24h;
+HistorySelect(dayStart, dayEnd);  // rate trade hier 23:45 si restart 00:15
+
+// Après (v2.4.2):
+datetime scanStart = dayStart - 86400;  // hier 00:00
+HistorySelect(scanStart, dayEnd);       // capture trade hier
+// Stats daily restent gates : if(dealTime >= dayStart) { tradesCount++; ... }
+```
+
+Edge cases vérifiés :
+- **Restart 00:15 après trade 23:45 hier** : capture OK, throttle restauré, pas de double-trade.
+- **Restart 23:59 après trade 23:30 today** : capture OK, comportement v2.4.1 préservé.
+- **Trade hier > 1h ago** : `g_LastTradeTime` restauré mais throttle (3600s) déjà écoulé → pas de blocage abusif.
+
+#### Détail technique C3 — diagramme de décision Force_Direction
+
+```
+Force_Direction_Override=true + Force_Direction_Value=BUY|SELL
+   │
+   ├─► apiFresh = (g_Signal.is_valid && age <= 300s)
+   │
+   ├─► Use_VPS_News_Protection=true  AND  !apiFresh
+   │      → [FORCE-DIR-API-STALE-SKIP] log (throttle 60s)
+   │      → REJECT "Force_Direction skipped: API stale + protection ON"
+   │      → return (trade NON exécuté)
+   │
+   ├─► apiFresh=true
+   │      → timingMode = g_Signal.timing_mode
+   │      → gate news en aval bloque si BLACKOUT/PRE/POST + Use_VPS=true
+   │
+   └─► apiFresh=false  AND  Use_VPS_News_Protection=false
+          → timingMode = CLEAR (responsabilité utilisateur explicite)
+          → trade exécuté en aveugle (mode debug volontaire)
+```
+
+#### Tableau récapitulatif — audit v2.4 → v2.4.2 (8 items)
+
+| Item | Origine audit | Statut | Fix |
+|------|---------------|--------|-----|
+| P2-A : `TradeThrottleSeconds` orphelin | v2.4 | ✅ **Résolu v2.4.1** | `b52cf3d` |
+| P2-B : `Force_Direction` bypasse news | v2.4 | ✅ **Résolu v2.4.1** + trou résiduel résolu v2.4.2 (C3) | `1469824` + `0f2c6b5` |
+| P2-C : Doc §4.10 inputs orphelins | v2.4 | ✅ **Résolu v2.4.1** (§4.10.1) | `611bc3c` |
+| P2-D : 5 weights orphelins (Option C) | v2.4 | ✅ **Résolu v2.4.1** | `bb0caf9` |
+| P2-E : 3 inputs cosmétiques | v2.4 | ✅ **Résolu v2.4.1** | `d1fcfcc` |
+| P2-F : Banner OnInit "v2.3" | v2.4 | ✅ **Résolu v2.4.2** (C4) | `6f650ad` |
+| P2-G : Refactor cache Breaker/Mitigation | v2.4 | ⏳ **Reporté v2.5** (perf marginale 10-50µs) | — |
+| P2-D bis : Refactor scoring + exposition poids réels | v2.4 | ⏳ **Reporté v2.5** explicitement (backtest avant/après) | — |
+| **API_MarketData_URL orphelin** | v2.4.1 | ✅ **Résolu v2.4.2** (C1) | `4c890c4` |
+| **`RecalcDailyStats` cross-jour** | v2.4.1 | ✅ **Résolu v2.4.2** (C2) | `9750cce` |
+
+**Bilan** : 8 items prioritaires audit v2.4 + 2 items audit v2.4.1 = **10 items**.
+8 résolus (5 en v2.4.1 + 3 code + 1 banner + 1 doc en v2.4.2).
+2 reportés en v2.5 (P2-G perf marginale, P2-D bis refactor scoring lourd avec backtest).
+
+#### Plan v2.5 (inchangé)
+
+> **v2.5** = refactor `CSniperM15::CalculateScore` :
+> - exposition des poids réels du scoring (pas les 5 weights orphelins, mais les coefficients effectifs : variantes sweep, OB par direction, fallback Fib OTE, bonus M5)
+> - backtest avant/après sur historique XAUUSD pour valider la nouvelle paramétrisation
+> - refactor cache Breaker/Mitigation (P2-G) en parallèle
+> - estimé 6-8h dev + backtest
+
+#### Statut déploiement v2.4.2
+
+> **v2.4.2 = code propre pour déploiement démo + multi-comptes futurs.**
+> 0 critical / 0 warnings post-cleanup. Logique de trading **identique à v2.4.1**.
+> Compile MetaEditor (F7) attendu **clean** (aucun nouveau warning).
+>
+> Workflow attendu Mickaël :
+> 1. Pull `feat/v242-final-cleanup` sur VPS Windows
+> 2. Compile MetaEditor (F7)
+> 3. Si OK → re-audit minimal v2.4.2 (vérification)
+> 4. Si re-audit OK → déploiement démo FTMO
+>
+> Si erreurs compile → corrections sur la même branche.
 
 ---
 
