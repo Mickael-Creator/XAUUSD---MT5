@@ -350,6 +350,10 @@ datetime g_DayStart = 0;
 double g_DayStartBalance = 0;  // FIX C-9.1 (2026-04-03): Balance début de journée FTMO
 int g_TradesToday = 0;
 int g_LocalTradesToday = 0;  // Compteur trades en mode local
+// v2.4.1 (2026-04-25): Throttle global inter-trades (audit P2-A) - cable dans
+// CheckEntry pour respecter TradeThrottleSeconds. Persiste via RecalcDailyStats
+// au restart EA pour eviter un double-trade collé apres reboot.
+datetime g_LastTradeTime = 0;
 
 // FIX A3+A4 (2026-04-04): Handles locaux caches (OnInit au lieu de chaque tick)
 int g_hLocalEMA20 = INVALID_HANDLE;
@@ -1764,6 +1768,21 @@ void CheckEntry() {
    static datetime lastSniperBarM5   = 0;
    static string   lastSniperSetup   = "";
 
+   //================================================================
+   // THROTTLE INTER-TRADES (v2.4.1 - audit P2-A)
+   //================================================================
+   // Empeche d'ouvrir un nouveau trade tant que TradeThrottleSeconds ne sont
+   // pas ecoules depuis le dernier trade ouvert. Default 3600s (1h).
+   // Mettre TradeThrottleSeconds=0 pour desactiver. Court-circuite tot le
+   // pipeline pour eviter les analyses ICT inutiles.
+   if(TradeThrottleSeconds > 0 && g_LastTradeTime > 0) {
+      long elapsed = (long)(TimeCurrent() - g_LastTradeTime);
+      if(elapsed < TradeThrottleSeconds) {
+         REJECT("Throttle inter-trades " + IntegerToString((int)elapsed) +
+                "s/" + IntegerToString(TradeThrottleSeconds) + "s");
+      }
+   }
+
    // === DETERMINER LA SOURCE DU SIGNAL ===
    string direction;
    double confidence;
@@ -2455,6 +2474,8 @@ void ExecuteTrade(string direction) {
       g_InPosition = true;
       g_CurrentDirection = direction;
       g_TradesToday++;
+      // v2.4.1 (2026-04-25): horodate l'ouverture pour le throttle inter-trades
+      g_LastTradeTime = TimeCurrent();
 
       Print("TRADE OPENED - Ticket: ", g_Ticket);
 
@@ -2928,9 +2949,10 @@ void RecalcDailyStats() {
       return;
    }
 
-   int    tradesCount = 0;
-   double totalPnL    = 0;
-   int    totalDeals  = HistoryDealsTotal();
+   int      tradesCount    = 0;
+   double   totalPnL       = 0;
+   datetime lastEntryTime  = 0;  // v2.4.1: dernier DEAL_ENTRY_IN du jour pour throttle
+   int      totalDeals     = HistoryDealsTotal();
 
    for(int i = 0; i < totalDeals; i++) {
       ulong dealTicket = HistoryDealGetTicket(i);
@@ -2952,13 +2974,22 @@ void RecalcDailyStats() {
          totalPnL += HistoryDealGetDouble(dealTicket, DEAL_SWAP);
          totalPnL += HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
       }
+
+      // v2.4.1 (2026-04-25): tracer le dernier DEAL_ENTRY_IN pour persister
+      // g_LastTradeTime au restart EA (anti double-trade colle apres reboot).
+      if(dealEntry == DEAL_ENTRY_IN || dealEntry == DEAL_ENTRY_INOUT) {
+         datetime t = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+         if(t > lastEntryTime) lastEntryTime = t;
+      }
    }
 
    g_TradesToday = tradesCount;
    g_DailyPnL    = totalPnL;
+   if(lastEntryTime > 0) g_LastTradeTime = lastEntryTime;
 
    Print("[AUDIT-C5] Daily stats restored: trades=", tradesCount,
-         " PnL=", DoubleToString(totalPnL, 2));
+         " PnL=", DoubleToString(totalPnL, 2),
+         " | LastEntry=", (lastEntryTime > 0 ? TimeToString(lastEntryTime, TIME_DATE|TIME_MINUTES) : "none"));
 
    // AUDIT-C5: Sync Quality Filters daily counters if the method is available
    // (CQualityFilters does not expose SetDailyStats — counters are managed internally
