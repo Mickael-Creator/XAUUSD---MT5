@@ -40,6 +40,8 @@ CQualityFilters* g_filters = NULL;
 CLiquidityLevels* g_liquidity = NULL;
 // v2.4 (2026-04-25) : detecteur ICT dedie aux scans H1 (FVG H1, futures Breaker H1)
 CICT_Detector* g_ictH1 = NULL;
+// v2.4 (2026-04-25) : timestamp du dernier log WEEKLY-STATS (throttle 24h)
+datetime g_LastWeeklyStatsTime = 0;
 
 //+------------------------------------------------------------------+
 //| API CONFIGURATION                                                 |
@@ -754,15 +756,91 @@ void OnTick() {
 //+------------------------------------------------------------------+
 //| TIMER FUNCTION - API health check sans ticks                      |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| v2.4 WEEKLY-STATS - Snapshot perf 7 derniers jours (2026-04-25)   |
+//+------------------------------------------------------------------+
+// Aggregation des deals fermes sur les 7 derniers jours, filtres par
+// Magic_Number_BUY ou Magic_Number_SELL. Calcule trades, win-rate,
+// profit factor, P/L net, P/L moyen.
+//
+// Hooke dans OnTimer avec throttle 24h. Donne un signal de tendance
+// rapide pour evaluer la sante du EA en demo sans interroger MT5
+// manuellement.
+//+------------------------------------------------------------------+
+void ComputeAndLogWeeklyStats() {
+   datetime fromTime = TimeCurrent() - 7 * 86400;
+   datetime toTime   = TimeCurrent();
+
+   if(!HistorySelect(fromTime, toTime)) {
+      Print("[WEEKLY-STATS] HistorySelect failed - skip");
+      return;
+   }
+
+   int    totalDeals = HistoryDealsTotal();
+   int    trades     = 0;
+   int    wins       = 0;
+   int    losses     = 0;
+   double grossWin   = 0.0;
+   double grossLoss  = 0.0;  // valeur positive (somme des |pertes|)
+
+   for(int i = 0; i < totalDeals; i++) {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+
+      long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
+      if(magic != Magic_Number_BUY && magic != Magic_Number_SELL) continue;
+
+      // Compter uniquement les deals de fermeture (DEAL_ENTRY_OUT)
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT) continue;
+
+      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                    + HistoryDealGetDouble(ticket, DEAL_SWAP)
+                    + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+
+      trades++;
+      if(profit > 0.0) {
+         wins++;
+         grossWin += profit;
+      } else if(profit < 0.0) {
+         losses++;
+         grossLoss += MathAbs(profit);
+      }
+      // profit == 0 : break-even, compte dans trades mais ni win ni loss
+   }
+
+   if(trades == 0) {
+      Print("[WEEKLY-STATS] last 7d | trades=0",
+            " | (BUY_magic=", Magic_Number_BUY, " SELL_magic=", Magic_Number_SELL, ")");
+      return;
+   }
+
+   double netPL        = grossWin - grossLoss;
+   double winRate      = 100.0 * wins / trades;
+   double profitFactor = (grossLoss > 0.001) ? (grossWin / grossLoss)
+                                              : (grossWin > 0.0 ? 999.99 : 0.0);
+   double avgTrade     = netPL / trades;
+
+   Print("[WEEKLY-STATS] last 7d",
+         " | trades=", trades,
+         " | WR=", DoubleToString(winRate, 1), "%",
+         " (", wins, "W/", losses, "L)",
+         " | PF=", DoubleToString(profitFactor, 2),
+         " | net=", DoubleToString(netPL, 2),
+         " | avg=", DoubleToString(avgTrade, 2),
+         " | grossWin=", DoubleToString(grossWin, 2),
+         " grossLoss=", DoubleToString(grossLoss, 2));
+}
+
 void OnTimer() {
    // Skip si en position (OnTick gÃ¨re dÃ©jÃ )
    if(g_InPosition) return;
-   
+
    // Skip weekend
    MqlDateTime dt;
    TimeCurrent(dt);
    if(dt.day_of_week == 0 || dt.day_of_week == 6) return;
-   
+
    // CORRECTION 11: Refresh API avec throttling
    if((TimeCurrent() - g_LastAPICall) >= API_Refresh_Seconds) {
       // Silencieux sauf si succÃ¨s
@@ -770,12 +848,19 @@ void OnTimer() {
          static string lastMode = "";
          // Ne print que si timing_mode change
          if(g_Signal.timing_mode != lastMode) {
-            Print("ðŸ”„ Timer: API OK - ", g_Signal.direction, 
-                  " | Confidence: ", g_Signal.confidence, 
+            Print("ðŸ”„ Timer: API OK - ", g_Signal.direction,
+                  " | Confidence: ", g_Signal.confidence,
                   "% | Timing: ", g_Signal.timing_mode);
             lastMode = g_Signal.timing_mode;
          }
       }
+   }
+
+   // v2.4 (2026-04-25) : WEEKLY-STATS — log perf 7 jours, throttle 24h.
+   // Premier appel ~60s apres EA start (g_LastWeeklyStatsTime=0).
+   if(TimeCurrent() - g_LastWeeklyStatsTime >= 86400) {
+      ComputeAndLogWeeklyStats();
+      g_LastWeeklyStatsTime = TimeCurrent();
    }
 }
 
@@ -1924,75 +2009,69 @@ void CheckEntry() {
    }
 
    //================================================================
-   // ETAPE 4 (v2.4) - FVG H1 BONUS (ICT continuation HTF)
-   // Une FVG H1 ouverte alignee = imbalance HTF non comble. On bonifie
-   // le score Sniper de Weight_FVG_H1 (default 15). Applique AVANT le
-   // scoreThreshold check pour qu'un setup limite puisse etre sauve par
-   // un contexte HTF favorable. Score cape a 100.
+   // ETAPES 4-6 (v2.4) - HTF BONUSES BREAKDOWN
+   // Calcul des 3 bonus ICT/HTF (FVG H1, Breaker, Mitigation) en
+   // accumulation explicite, sans mutation in-place. Application unique
+   // a la fin avec cap 100. Logs centralises via [SCORE-V24] (commit 7).
    //================================================================
-   int fvgH1Bonus = 0;
+   int sniperBaseScore = g_LastSniper.score;  // score brut Sniper avant HTF
+
+   // -- ETAPE 4 : FVG H1
+   int         fvgH1Bonus = 0;
    ICT_PDArray fvgH1;
    if(Enable_FVG_H1 && g_ictH1 != NULL && DetectFVG_H1(direction, fvgH1)) {
       fvgH1Bonus = Weight_FVG_H1;
-      int scoreBefore = g_LastSniper.score;
-      g_LastSniper.score = (int)MathMin(100, scoreBefore + fvgH1Bonus);
       Print("[FVG-H1-PASS] dir=", direction,
             " zone=[", DoubleToString(fvgH1.zoneLow, _Digits),
             "..", DoubleToString(fvgH1.zoneHigh, _Digits), "]",
             " strength=", DoubleToString(fvgH1.strength, 0),
-            " bonus=+", fvgH1Bonus,
-            " | score: ", scoreBefore, " -> ", g_LastSniper.score);
+            " bonus=+", fvgH1Bonus);
    } else if(Enable_FVG_H1) {
       Print("[FVG-H1-NONE] dir=", direction,
             " | aucune FVG H1 ouverte trouvee (lookback=50 H1)");
    }
 
-   //================================================================
-   // ETAPE 5 (v2.4) - BREAKER BLOCK BONUS (ICT structure flip)
-   // Une OB violee qui a flippe support/resistance et est actuellement
-   // en retest. Bonus de score Weight_Breaker (default 10). Pareil que
-   // FVG H1 : applique avant scoreThreshold, score cape a 100.
-   //================================================================
-   int breakerBonus = 0;
+   // -- ETAPE 5 : Breaker Block
+   int         breakerBonus = 0;
    ICT_PDArray breakerBlock;
    if(Enable_Breaker_Block && DetectBreakerBlock(direction, breakerBlock)) {
       breakerBonus = Weight_Breaker;
-      int scoreBefore = g_LastSniper.score;
-      g_LastSniper.score = (int)MathMin(100, scoreBefore + breakerBonus);
       Print("[BREAKER-PASS] dir=", direction,
             " zone=[", DoubleToString(breakerBlock.zoneLow, _Digits),
             "..", DoubleToString(breakerBlock.zoneHigh, _Digits), "]",
             " strength=", DoubleToString(breakerBlock.strength, 0),
-            " bonus=+", breakerBonus,
-            " | score: ", scoreBefore, " -> ", g_LastSniper.score);
+            " bonus=+", breakerBonus);
    } else if(Enable_Breaker_Block) {
       Print("[BREAKER-NONE] dir=", direction,
             " | aucun Breaker Block en retest (lookback=80 M15)");
    }
 
-   //================================================================
-   // ETAPE 6 (v2.4) - MITIGATION BLOCK BONUS (ICT continuation intact)
-   // Une OB same-direction intacte (jamais violee) en retest. Distinction
-   // vs Breaker : Breaker = OB counter violee qui flippe ; Mitigation =
-   // OB same intacte qui confirme la continuation. Bonus Weight_Mitigation
-   // (default 5). Cumulatif avec FVG H1 + Breaker, score cape a 100.
-   //================================================================
-   int mitigBonus = 0;
+   // -- ETAPE 6 : Mitigation Block
+   int         mitigBonus = 0;
    ICT_PDArray mitigBlock;
    if(Enable_Mitigation_Block && DetectMitigationBlock(direction, mitigBlock)) {
       mitigBonus = Weight_Mitigation;
-      int scoreBefore = g_LastSniper.score;
-      g_LastSniper.score = (int)MathMin(100, scoreBefore + mitigBonus);
       Print("[MITIG-PASS] dir=", direction,
             " zone=[", DoubleToString(mitigBlock.zoneLow, _Digits),
             "..", DoubleToString(mitigBlock.zoneHigh, _Digits), "]",
             " strength=", DoubleToString(mitigBlock.strength, 0),
-            " bonus=+", mitigBonus,
-            " | score: ", scoreBefore, " -> ", g_LastSniper.score);
+            " bonus=+", mitigBonus);
    } else if(Enable_Mitigation_Block) {
       Print("[MITIG-NONE] dir=", direction,
             " | aucun Mitigation Block intact en retest (lookback=80 M15)");
    }
+
+   // -- Application centralisee (cap 100) + log breakdown unifie
+   int totalHTFBonus  = fvgH1Bonus + breakerBonus + mitigBonus;
+   g_LastSniper.score = (int)MathMin(100, sniperBaseScore + totalHTFBonus);
+
+   Print("[SCORE-V24] dir=", direction,
+         " | base=", sniperBaseScore, "/100",
+         " | FVG_H1=+", fvgH1Bonus,
+         " Breaker=+", breakerBonus,
+         " Mitig=+", mitigBonus,
+         " | total_HTF=+", totalHTFBonus,
+         " | final=", g_LastSniper.score, "/100");
 
    if(g_LastSniper.score < scoreThreshold)
       REJECT("Score " + IntegerToString(g_LastSniper.score) + "<" + IntegerToString(scoreThreshold) + " (" + g_LastSniper.reason + ")");
