@@ -38,6 +38,8 @@ CPositionManagerV2* g_posMgr = NULL;
 CQualityFilters* g_filters = NULL;
 // PHASE 1 APPROCHE A: infrastructure niveaux ICT (non branchee Phase 1)
 CLiquidityLevels* g_liquidity = NULL;
+// v2.4 (2026-04-25) : detecteur ICT dedie aux scans H1 (FVG H1, futures Breaker H1)
+CICT_Detector* g_ictH1 = NULL;
 
 //+------------------------------------------------------------------+
 //| API CONFIGURATION                                                 |
@@ -474,6 +476,18 @@ int OnInit() {
             Enable_ICT_Liquidity ? "ON" : "OFF");
    }
 
+   // v2.4 (2026-04-25) : detecteur ICT dedie aux scans HTF (FVG H1, etc.)
+   // Le sniper M15 a son propre detecteur interne pour M5 ; on en cree un
+   // second au niveau EA pour les scans H1, evitant de partager l'etat.
+   g_ictH1 = new CICT_Detector(_Symbol);
+   if(g_ictH1 == NULL) {
+      Print("[FVG-H1] WARNING: echec allocation CICT_Detector H1 - bonus desactive runtime");
+   } else {
+      Print("[FVG-H1] H1 detector initialise | Enable_FVG_H1=",
+            Enable_FVG_H1 ? "ON" : "OFF",
+            " | Weight_FVG_H1=", Weight_FVG_H1);
+   }
+
    // CORRECTION 5: Initial API fetch avec meilleure gestion d'erreur
    if(FetchNewsSignal()) {
       Print("âœ… API connected - Signal: ", g_Signal.direction, 
@@ -564,6 +578,11 @@ void OnDeinit(const int reason) {
    if(g_liquidity != NULL) {
       delete g_liquidity;
       g_liquidity = NULL;
+   }
+   // v2.4 (2026-04-25) : cleanup detecteur H1
+   if(g_ictH1 != NULL) {
+      delete g_ictH1;
+      g_ictH1 = NULL;
    }
 
    Comment("");
@@ -1296,6 +1315,53 @@ bool CheckPremiumDiscountFilter(string direction) {
 }
 
 //+------------------------------------------------------------------+
+//| v2.4 FVG H1 DETECTION (2026-04-25)                                |
+//+------------------------------------------------------------------+
+// Detecte la derniere FVG H1 dans le sens du trade pour bonifier le score
+// Sniper. Une FVG H1 ouverte = imbalance HTF non comble, signal de
+// continuation ICT plus fort qu'une simple FVG M5.
+//
+// Reutilise CICT_Detector::FindLatestFVG (meme algo que la FVG M5 du
+// pullback Sniper) avec les arrays H1 sur les 50 dernieres bougies (~2j).
+// Une FVG deja mitigated (entierement comble par le prix actuel) ne compte
+// pas : on ne veut que des imbalances ouvertes.
+//
+// Signature : retourne true si une FVG H1 valide est trouvee, remplit outFvg.
+//+------------------------------------------------------------------+
+bool DetectFVG_H1(string direction, ICT_PDArray &outFvg) {
+   if(g_ictH1 == NULL) return false;
+
+   const int lookback = 50;  // ~50 bougies H1 = ~2 jours
+
+   double   high_H1[];
+   double   low_H1[];
+   datetime time_H1[];
+
+   ArraySetAsSeries(high_H1, true);
+   ArraySetAsSeries(low_H1,  true);
+   ArraySetAsSeries(time_H1, true);
+
+   if(CopyHigh(_Symbol, PERIOD_H1, 0, lookback + 5, high_H1) <= 0) return false;
+   if(CopyLow (_Symbol, PERIOD_H1, 0, lookback + 5, low_H1)  <= 0) return false;
+   if(CopyTime(_Symbol, PERIOD_H1, 0, lookback + 5, time_H1) <= 0) return false;
+
+   if(!g_ictH1.FindLatestFVG(direction, high_H1, low_H1, time_H1, lookback, outFvg))
+      return false;
+
+   if(!outFvg.found) return false;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(g_ictH1.IsMitigated(bid, outFvg, 0.0)) {
+      Print("[FVG-H1-MITIGATED] zone=[", DoubleToString(outFvg.zoneLow, _Digits),
+            "..", DoubleToString(outFvg.zoneHigh, _Digits),
+            "] dejà comblee par bid=", DoubleToString(bid, _Digits));
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| CHECK ENTRY CONDITIONS (Dual-mode: API + Local)                   |
 //+------------------------------------------------------------------+
 void CheckEntry() {
@@ -1562,6 +1628,30 @@ void CheckEntry() {
       g_lastSweepDetected = g_LastSniper.sweep.sweepType +
                             DoubleToString(g_LastSniper.sweep.sweepPrice, 2);
       g_lastSweepTime     = TimeGMT();
+   }
+
+   //================================================================
+   // ETAPE 4 (v2.4) - FVG H1 BONUS (ICT continuation HTF)
+   // Une FVG H1 ouverte alignee = imbalance HTF non comble. On bonifie
+   // le score Sniper de Weight_FVG_H1 (default 15). Applique AVANT le
+   // scoreThreshold check pour qu'un setup limite puisse etre sauve par
+   // un contexte HTF favorable. Score cape a 100.
+   //================================================================
+   int fvgH1Bonus = 0;
+   ICT_PDArray fvgH1;
+   if(Enable_FVG_H1 && g_ictH1 != NULL && DetectFVG_H1(direction, fvgH1)) {
+      fvgH1Bonus = Weight_FVG_H1;
+      int scoreBefore = g_LastSniper.score;
+      g_LastSniper.score = (int)MathMin(100, scoreBefore + fvgH1Bonus);
+      Print("[FVG-H1-PASS] dir=", direction,
+            " zone=[", DoubleToString(fvgH1.zoneLow, _Digits),
+            "..", DoubleToString(fvgH1.zoneHigh, _Digits), "]",
+            " strength=", DoubleToString(fvgH1.strength, 0),
+            " bonus=+", fvgH1Bonus,
+            " | score: ", scoreBefore, " -> ", g_LastSniper.score);
+   } else if(Enable_FVG_H1) {
+      Print("[FVG-H1-NONE] dir=", direction,
+            " | aucune FVG H1 ouverte trouvee (lookback=50 H1)");
    }
 
    if(g_LastSniper.score < scoreThreshold)
