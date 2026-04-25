@@ -94,7 +94,9 @@ struct TrailingInfo {
 class CPositionManagerV2 {
 private:
    string   m_symbol;
-   int      m_magic;
+   // v2.4 (2026-04-25): split magic BUY/SELL
+   int      m_magicBuy;
+   int      m_magicSell;
    CTrade   m_trade;
    
    // Settings - Partial TP
@@ -147,7 +149,9 @@ private:
    bool     IsBOSAgainstPosition();
    
 public:
-   CPositionManagerV2(string symbol, int magic);
+   CPositionManagerV2(string symbol, int magicBuy, int magicSell);
+   // v2.4: helper, matche l'un OU l'autre magic (BUY/SELL)
+   bool IsOurMagic(long m) { return (m == (long)m_magicBuy) || (m == (long)m_magicSell); }
    ~CPositionManagerV2();
    
    // Initialization
@@ -204,15 +208,18 @@ public:
 //+------------------------------------------------------------------+
 //| Constructor                                                       |
 //+------------------------------------------------------------------+
-CPositionManagerV2::CPositionManagerV2(string symbol, int magic) {
+CPositionManagerV2::CPositionManagerV2(string symbol, int magicBuy, int magicSell) {
    m_symbol = symbol;
-   m_magic = magic;
+   m_magicBuy  = magicBuy;
+   m_magicSell = magicSell;
    m_initialized = false;
    m_hasPosition = false;
-   
+
    m_hATR = INVALID_HANDLE;
-   
-   m_trade.SetExpertMagicNumber(magic);
+
+   // v2.4: m_trade utilise pour PositionModify/PositionClose (par ticket, magic non requis).
+   // On set magicBuy par defaut ; PARTIAL TP utilise le magic dynamique de la position.
+   m_trade.SetExpertMagicNumber(magicBuy);
    m_trade.SetDeviationInPoints(10);
 }
 
@@ -702,7 +709,8 @@ bool CPositionManagerV2::ExecutePartialTP() {
    request.type = m_position.isBuy ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    request.price = m_position.currentPrice;
    request.position = m_position.ticket;
-   request.magic = m_magic;
+   // v2.4: utiliser le magic correspondant a la direction de la position (BUY ou SELL)
+   request.magic = (m_position.isBuy ? m_magicBuy : m_magicSell);
    request.deviation = 10;
    request.comment = "PARTIAL " + DoubleToString(m_partialPercent, 0) + "% @" + DoubleToString(m_position.currentRR, 1) + "R";
    

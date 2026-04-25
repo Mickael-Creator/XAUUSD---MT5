@@ -97,7 +97,8 @@ input double Sniper_SL_Min_Pips = 25.0;    // M15: SL minimum (evite stop hunts 
 // Max SL etendu 45 -> 55 pips (2026-04-17)
 // Gold FTMO spread 50-65 pts impose SL minimum realiste
 // Coherent avec filtre Option 5A SL-5A dans Sniper (seuil 55)
-input double Sniper_SL_Max_Pips = 55.0;    // M15: SL max (partial TP toujours viable)
+// v2.4 (2026-04-25): renomme Sniper_SL_Max_Pips -> SL_Cap_Pips (alias semantique)
+input double SL_Cap_Pips        = 55.0;    // M15: SL max / cap (partial TP toujours viable)
 input bool   Use_M5_Confirmation = true;   // Confirmation pattern M5
 
 //+------------------------------------------------------------------+
@@ -120,12 +121,19 @@ input double Trail_ATR_Mult = 1.5;
 input group "â•â•â• RISK MANAGEMENT FTMO â•â•â•"
 // AUDIT-C4: Dynamic sizing by risk % replaces fixed lot size
 input double Risk_Percent    = 1.0;   // % of equity risked per trade (default 1%)
-input double Max_Risk_Percent = 2.0;  // Hard cap on risk % per trade
+// v2.4 (2026-04-25): renomme Max_Risk_Percent -> Hard_Cap_Risk + durcissement 2.0 -> 1.5
+input double Hard_Cap_Risk   = 1.5;   // Hard cap on risk % per trade (v2.4: 2.0->1.5)
 // AUDIT-C4: DEPRECATED — kept for backwards compatibility only; ignored when Risk_Percent > 0
 input double Base_Lot_Size = 0.10;    // DEPRECATED: use Risk_Percent instead
-input int    Magic_Number = 888892;
+// v2.4 (2026-04-25): split Magic_Number -> Magic_Number_BUY + Magic_Number_SELL
+// Permet de filtrer l'historique BUY vs SELL pour stats post-3-semaines.
+// Les positions ouvertes pre-v2.4 (magic=888892) restent associees au cote BUY.
+input int    Magic_Number_BUY  = 888892;
+input int    Magic_Number_SELL = 888893;
 input double Max_Daily_Loss_EUR = 400.0;
 input double Max_Daily_Trades = 6;
+// v2.4 (2026-04-25): throttle global entre trades (3600s = 1h, FTMO-safe)
+input int    TradeThrottleSeconds = 3600;
 input double FTMO_Daily_DD_Limit = 4.5;    // % - arrÃªt Ã  4.5% (avant 5%)
 // FIX C3 (2026-04-03): Balance initiale FTMO pour calcul DD total
 input double FTMO_Initial_Balance = 10000.0;  // Taille du compte FTMO challenge 10K
@@ -150,8 +158,11 @@ input bool   Enable_Session_Filter = true;
 //   - London Open       (07:00-16:00 GMT)
 //   - NY Session        (13:00-21:00 GMT)
 // Modifier si besoin via inputs MT5
-input string Session_Start = "00:00";
-input string Session_End   = "21:00";
+// v2.4 (2026-04-25): renomme Session_Start/End -> Trading_Session_*
+input string Trading_Session_Start = "00:00";
+input string Trading_Session_End   = "21:00";
+// v2.4: eviter heure de rollover broker (22:00-23:00 GMT) - spread anormal
+input bool   Skip_Rollover         = true;
 
 
 //+------------------------------------------------------------------+
@@ -186,6 +197,50 @@ input bool   Enable_H4_Hard_Veto = true;
 // ce seuil n est pas evalue (comportement attendu).
 input group "=== DEAL-v2 REJECT THRESHOLD ==="
 input int    DEAL_Reject_Threshold = -20;
+
+//+------------------------------------------------------------------+
+//| v2.4 BYPASS VPS / DEBUG (2026-04-25)                              |
+//+------------------------------------------------------------------+
+// Bypass du filtre directionnel VPS : audit confirme EA solide en LOCAL/ICT.
+// VPS conserve pour news (BLACKOUT, PRE_NEWS, POST_NEWS) si Use_VPS_News_Protection=true.
+// Force_Direction_Override : utiliser uniquement pour debug (bypass complet du
+// pipeline de selection de direction).
+input group "=== v2.4 BYPASS VPS / DEBUG ==="
+input bool   Use_VPS_Direction        = false;   // false = LOCAL/ICT decide direction
+input bool   Use_VPS_News_Protection  = true;    // true = blackout/PRE/POST news actifs
+input bool   Log_Verbose              = true;    // true = logs detailles (heartbeat, score)
+input bool   Use_Debug_Mode           = false;   // true = traces additionnelles
+input bool   Force_Direction_Override = false;   // true = force direction (debug)
+input string Force_Direction_Value    = "NONE";  // BUY / SELL / NONE
+
+//+------------------------------------------------------------------+
+//| v2.4 ICT EXTENSIONS (2026-04-25)                                  |
+//+------------------------------------------------------------------+
+// Pipeline ICT etendu : 4 ajouts pour completer detection setups premium.
+//  - Premium/Discount Filter : binaire, rejette setup hors zone D1
+//  - Breaker Block : OB casse devient zone opposee (resistance/support)
+//  - Mitigation Block : OB partiellement teste puis rejete
+//  - FVG H1 : FVG sur HTF, priorite > FVG M5
+input group "=== v2.4 ICT EXTENSIONS ==="
+input bool   Enable_Premium_Discount_Filter = true;
+input bool   Enable_Breaker_Block           = true;
+input bool   Enable_Mitigation_Block        = true;
+input bool   Enable_FVG_H1                  = true;
+
+//+------------------------------------------------------------------+
+//| v2.4 SCORING WEIGHTS (2026-04-25)                                 |
+//+------------------------------------------------------------------+
+// Poids par composant du score Sniper (CalculateScore). Defaults equilibres.
+// Ne pas depasser 100 cumule (score normalise sur 100).
+input group "=== v2.4 SCORING WEIGHTS ==="
+input int    Weight_Sweep      = 25;
+input int    Weight_BOS        = 20;
+input int    Weight_FVG_H1     = 15;
+input int    Weight_FVG_M5     = 10;
+input int    Weight_OB         = 10;
+input int    Weight_Breaker    = 10;
+input int    Weight_Mitigation = 5;
+input int    Weight_Fib_OTE    = 5;
 
 //+------------------------------------------------------------------+
 //| SELL OPPORTUNITY ALERTS (PR serie 3 — 2026-04-22)                |
@@ -318,7 +373,8 @@ int OnInit() {
       Print("âš ï¸ WARNING: EA optimized for XAUUSD, running on ", _Symbol);
    }
    
-   trade.SetExpertMagicNumber(Magic_Number);
+   // v2.4 (2026-04-25): magic par defaut = BUY ; ExecuteTrade re-set le magic par direction
+   trade.SetExpertMagicNumber(Magic_Number_BUY);
    trade.SetDeviationInPoints(10);
    
    // Initialize signal
@@ -338,7 +394,7 @@ int OnInit() {
          Sniper_Require_Sweep, Sniper_Require_BOS,
          Sniper_Min_RR, Sniper_Min_Score, Sniper_Max_Spread,
          true, 10,  // Session boost (max 10 for overlap)
-         Sniper_SL_Buffer_Pips, Sniper_SL_Min_Pips, Sniper_SL_Max_Pips,
+         Sniper_SL_Buffer_Pips, Sniper_SL_Min_Pips, SL_Cap_Pips,
          Use_M5_Confirmation)) {
       Print("âŒ Sniper M15 initialization failed");
       delete g_sniper;
@@ -348,7 +404,7 @@ int OnInit() {
    Print("âœ… Sniper M15 initialized (M15 + M5 + ICT)");
    
    // CORRECTION 3: Initialize Position Manager avec validation
-   g_posMgr = new CPositionManagerV2(_Symbol, Magic_Number);
+   g_posMgr = new CPositionManagerV2(_Symbol, Magic_Number_BUY, Magic_Number_SELL);
    if(g_posMgr == NULL) {
       Print("âŒ Failed to create Position Manager object");
       return INIT_FAILED;
@@ -368,7 +424,7 @@ int OnInit() {
    Print("âœ… Position Manager initialized");
    
    // CORRECTION 4: Initialize Quality Filters avec validation
-   g_filters = new CQualityFilters(_Symbol, Magic_Number);
+   g_filters = new CQualityFilters(_Symbol, Magic_Number_BUY, Magic_Number_SELL);
    if(g_filters == NULL) {
       Print("âŒ Failed to create Quality Filters object");
       return INIT_FAILED;
@@ -384,7 +440,7 @@ int OnInit() {
          true, 4, 10, 5,       // Consecutive: losses=4, wins=10, sameDir=5
          true, 30.0, 5,        // Same level
          true, (int)Max_Daily_Trades, Max_Daily_Loss_EUR, 300.0,
-         Enable_Session_Filter, Session_Start, Session_End, false,
+         Enable_Session_Filter, Trading_Session_Start, Trading_Session_End, false,
          true,                  // enableTrendFilter (defaut explicite)
          Enable_H4_Hard_Veto,   // P2 (2026-04-22): veto structurel H4
          DEAL_Reject_Threshold  // P3 (2026-04-22): seuil de rejet DEAL-v2
@@ -451,7 +507,7 @@ int OnInit() {
    Print("  Version: v2.3 | Compte: ", AccountInfoInteger(ACCOUNT_LOGIN));
    Print("  Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
          " | Equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
-   Print("  Session: ", Session_Start, " - ", Session_End, " GMT");
+   Print("  Session: ", Trading_Session_Start, " - ", Trading_Session_End, " GMT");
    Print("  Max Spread: ", DoubleToString(Sniper_Max_Spread, 1), " pips");
    Print("  Risk: ", DoubleToString(Risk_Percent, 1), "%",
          " | Test Lot: ", DoubleToString(Phase_Test_Force_Lot, 2));
@@ -461,7 +517,7 @@ int OnInit() {
          " | H4 Hard Veto (P2): ", Enable_H4_Hard_Veto ? "ON" : "OFF",
          " | DEAL Reject (P3): ", DEAL_Reject_Threshold);
    Print("  Min Score: ", Sniper_Min_Score,
-         " | Max SL: ", DoubleToString(Sniper_SL_Max_Pips, 0), " pips",
+         " | Max SL: ", DoubleToString(SL_Cap_Pips, 0), " pips",
          " | Reclaim: 8 bougies | Scan sweep: 96 bougies (24h)");
    Print("====================================");
 
@@ -1531,7 +1587,7 @@ void ExecuteTrade(string direction) {
 
    // CORRECTION 21: Validation SL — clamp within FTMO-safe range
    if(slPips < Sniper_SL_Min_Pips) slPips = Sniper_SL_Min_Pips;
-   if(slPips > Sniper_SL_Max_Pips) slPips = Sniper_SL_Max_Pips;
+   if(slPips > SL_Cap_Pips) slPips = SL_Cap_Pips;
 
    // Apply wider stops if indicated
    if(g_Signal.wider_stops) {
@@ -1550,7 +1606,7 @@ void ExecuteTrade(string direction) {
    // Clamp risk to safety cap
    double effectiveRisk = Risk_Percent;
    if(effectiveRisk <= 0) effectiveRisk = 1.0;
-   if(effectiveRisk > Max_Risk_Percent) effectiveRisk = Max_Risk_Percent;
+   if(effectiveRisk > Hard_Cap_Risk) effectiveRisk = Hard_Cap_Risk;
 
    double equity       = AccountInfoDouble(ACCOUNT_EQUITY);
    double tickValue    = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -1759,6 +1815,11 @@ void ExecuteTrade(string direction) {
    bool success = false;
    int deviations[] = {10, 30, 50};
 
+   // v2.4 (2026-04-25): set magic dynamiquement selon la direction (BUY ou SELL)
+   int execMagic = (direction == "BUY") ? Magic_Number_BUY : Magic_Number_SELL;
+   trade.SetExpertMagicNumber(execMagic);
+   Print("[MAGIC] Direction=", direction, " -> magic=", execMagic);
+
    for(int attempt = 0; attempt < 3 && !success; attempt++) {
       trade.SetDeviationInPoints(deviations[attempt]);
 
@@ -1923,7 +1984,8 @@ void ClosePositionHandler() {
             if(dealTicket > 0) {
                // VÃ©rifier le magic number
                long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
-               if(dealMagic == Magic_Number) {
+               // v2.4: accepter BUY ou SELL magic
+               if(dealMagic == (long)Magic_Number_BUY || dealMagic == (long)Magic_Number_SELL) {
                   ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
                   if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_INOUT) {
                      profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
@@ -2201,7 +2263,8 @@ void SyncOpenPositions() {
       if(!PositionSelectByTicket(ticket)) continue;
 
       long magic = PositionGetInteger(POSITION_MAGIC);
-      if(magic != Magic_Number) continue;
+      // v2.4: accepter BUY ou SELL magic
+      if(magic != (long)Magic_Number_BUY && magic != (long)Magic_Number_SELL) continue;
 
       string sym = PositionGetString(POSITION_SYMBOL);
       if(sym != _Symbol) continue;
@@ -2271,7 +2334,8 @@ void RecalcDailyStats() {
       if(dealTicket == 0) continue;
 
       long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
-      if(dealMagic != Magic_Number) continue;
+      // v2.4: accepter BUY ou SELL magic
+      if(dealMagic != (long)Magic_Number_BUY && dealMagic != (long)Magic_Number_SELL) continue;
 
       string dealSym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
       if(dealSym != _Symbol) continue;
