@@ -232,19 +232,23 @@ input bool   Enable_Mitigation_Block        = true;
 input bool   Enable_FVG_H1                  = true;
 
 //+------------------------------------------------------------------+
-//| v2.4 SCORING WEIGHTS (2026-04-25)                                 |
+//| v2.4.1 SCORING WEIGHTS HTF (2026-04-25)                           |
 //+------------------------------------------------------------------+
-// Poids par composant du score Sniper (CalculateScore). Defaults equilibres.
-// Ne pas depasser 100 cumule (score normalise sur 100).
-input group "=== v2.4 SCORING WEIGHTS ==="
-input int    Weight_Sweep      = 25;
-input int    Weight_BOS        = 20;
-input int    Weight_FVG_H1     = 15;
-input int    Weight_FVG_M5     = 10;
-input int    Weight_OB         = 10;
-input int    Weight_Breaker    = 10;
-input int    Weight_Mitigation = 5;
-input int    Weight_Fib_OTE    = 5;
+// Bonus additifs HTF appliques apres CSniperM15::CalculateScore (cap 100 final).
+// Cumulatif maximum : +30 (15 + 10 + 5).
+//
+// v2.4.1 (audit P2-D - Option C): suppression de 5 weights orphelins
+// declares en v2.4 mais jamais consommes (Weight_Sweep / Weight_BOS /
+// Weight_FVG_M5 / Weight_OB / Weight_Fib_OTE). Le scoring Sniper interne
+// utilise des valeurs hardcodees dans CSniperM15::CalculateScore et
+// presente trop de variantes (multi-types de sweep, OB par direction, etc.)
+// pour se preter a une parametrisation simple sans refactor profond.
+// Refactor propre planifie en v2.5 avec backtest avant/apres.
+// Ref: Etat_Actuel_Systeme.md §4.10
+input group "=== v2.4.1 SCORING WEIGHTS HTF ==="
+input int    Weight_FVG_H1     = 15;  // bonus si FVG H1 alignee + non mitigee
+input int    Weight_Breaker    = 10;  // bonus si Breaker Block (OB countertrend casse + retest)
+input int    Weight_Mitigation = 5;   // bonus si Mitigation Block (OB samedir intacte + retest)
 
 //+------------------------------------------------------------------+
 //| SELL OPPORTUNITY ALERTS (PR serie 3 — 2026-04-22)                |
