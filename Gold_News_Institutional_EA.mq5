@@ -49,7 +49,8 @@ datetime g_LastWeeklyStatsTime = 0;
 input group "â•â•â• API NEWS TRADING â•â•â•"
 // AUDIT-VPS-C4: Default URL updated to versioned endpoint
 input string API_News_URL = "http://86.48.5.126:5002/v1/news_trading_signal/quick";
-input string API_MarketData_URL = "http://86.48.5.126:5002/v1/market_data";
+// v2.4.2 (2026-04-25 audit C1): suppression input API_MarketData_URL orphelin.
+// Plus consomme depuis le cleanup PushMarketData() le 2026-04-03.
 input int    API_Timeout = 5000;
 input int    API_Refresh_Seconds = 30;
 // AUDIT-VPS-C1: Bearer token for API authentication — set in EA inputs, never hardcode
