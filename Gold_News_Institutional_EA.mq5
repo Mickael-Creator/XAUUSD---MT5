@@ -1838,19 +1838,48 @@ void CheckEntry() {
    // execution accidentelle en plein NFP / FOMC.
    if(Force_Direction_Override &&
       (Force_Direction_Value == "BUY" || Force_Direction_Value == "SELL")) {
+      // v2.4.2 (2026-04-25 audit C3): trou residuel comble (Option A).
+      // En v2.4.1, si API stale (signal absent OU > 300s) on retombait sur
+      // timingMode=CLEAR : un trade Force pouvait s'executer en plein NFP /
+      // FOMC tant que la protection news etait censee etre active mais que
+      // l'API VPS ne nous donnait plus le timingMode actuel. Cas pathologique
+      // mais reel (panne API + news + utilisateur en debug).
+      // Option A : si Use_VPS_News_Protection=true ET API stale, on SKIP
+      // l'override pour rester coherent avec P2-B (Force respecte la
+      // protection news). L'utilisateur peut desactiver Use_VPS_News_Protection
+      // s'il veut vraiment forcer en aveugle (responsabilite explicite).
+      bool apiFresh = (g_Signal.is_valid && (TimeCurrent() - g_Signal.last_update) <= 300);
+      if(Use_VPS_News_Protection && !apiFresh) {
+         // Log diagnostic detaille throttle a 60s pour eviter le spam OnTick.
+         // Le REJECT en aval reste deduplique via lastRejectReason.
+         static datetime s_lastForceDirSkipLog = 0;
+         if(TimeCurrent() - s_lastForceDirSkipLog >= 60) {
+            Print("[FORCE-DIR-API-STALE-SKIP] Force_Direction=", Force_Direction_Value,
+                  " mais API stale (is_valid=", (g_Signal.is_valid ? "true" : "false"),
+                  ", age=",
+                  (g_Signal.is_valid ? IntegerToString((int)(TimeCurrent() - g_Signal.last_update)) : "n/a"),
+                  "s). Use_VPS_News_Protection=true => SKIP (cf audit C3).");
+            s_lastForceDirSkipLog = TimeCurrent();
+         }
+         REJECT("Force_Direction skipped: API stale + Use_VPS_News_Protection=true");
+      }
       Print("[FORCE-DIR] Override actif - direction forcee a ", Force_Direction_Value);
       direction    = Force_Direction_Value;
       confidence   = 99.0;
       signalSource = "FORCE";
       // v2.4.1: respecter le timingMode API si signal recent (<300s),
       // sinon fallback CLEAR. La gate Use_VPS_News_Protection decide ensuite.
-      if(g_Signal.is_valid && (TimeCurrent() - g_Signal.last_update) <= 300) {
+      // v2.4.2 audit C3: la branche "stale + protection ON" a deja REJECT
+      // ci-dessus. Ici on n'arrive donc plus avec un fallback CLEAR risque
+      // sous protection active (les seuls fallback CLEAR restants sont en
+      // Use_VPS_News_Protection=false, mode debug volontaire).
+      if(apiFresh) {
          timingMode = g_Signal.timing_mode;
          Print("[FORCE-DIR] timingMode API conserve = ", timingMode,
                " (Use_VPS_News_Protection=", (Use_VPS_News_Protection ? "true" : "false"), ")");
       } else {
          timingMode = "CLEAR";
-         Print("[FORCE-DIR] API stale, timingMode=CLEAR (fallback)");
+         Print("[FORCE-DIR] API stale, timingMode=CLEAR (fallback) - protection news desactivee, responsabilite utilisateur");
       }
       sizeFactor   = Local_Size_Factor;
       tpMode       = "NORMAL";
