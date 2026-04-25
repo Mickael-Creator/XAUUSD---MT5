@@ -1362,6 +1362,153 @@ bool DetectFVG_H1(string direction, ICT_PDArray &outFvg) {
 }
 
 //+------------------------------------------------------------------+
+//| v2.4 BREAKER BLOCK DETECTION (2026-04-25)                         |
+//+------------------------------------------------------------------+
+// Detecte un Breaker Block M15 dans le sens du trade.
+//
+// Definition ICT :
+//   Bullish Breaker = bearish OB (down-candle = resistance) dont le high a
+//   ete brise par price action haussiere. Quand le prix y revient pour
+//   retester, la zone flippe de resistance -> support pour un BUY.
+//   Bearish Breaker = mirror (bullish OB dont le low a ete brise).
+//
+// Algorithme (M15, lookback 80 bars) :
+//   1. Scanner les bougies pour trouver un OB candidate (bearish pour BUY,
+//      bullish pour SELL) avec body >= 0.3 * ATR
+//   2. Verifier qu'une bougie subsequente CLOSE au-dela de la zone
+//      (BOS upward pour BUY, BOS downward pour SELL)
+//   3. Verifier que le bid actuel est revenu dans la zone OB (retest)
+//
+// Strength : body/ATR * 30 (cap 100), meme normalisation que FindLatestOB.
+//+------------------------------------------------------------------+
+bool DetectBreakerBlock(string direction, ICT_PDArray &outBreaker) {
+   outBreaker.found      = false;
+   outBreaker.type       = ICT_PD_NONE;
+   outBreaker.name       = "NONE";
+   outBreaker.zoneHigh   = 0;
+   outBreaker.zoneLow    = 0;
+   outBreaker.createdBar = -1;
+   outBreaker.strength   = 0;
+
+   const int lookback = 80;
+   const int bars     = lookback + 5;
+
+   double   open_M15[];
+   double   close_M15[];
+   double   high_M15[];
+   double   low_M15[];
+   datetime time_M15[];
+
+   ArraySetAsSeries(open_M15,  true);
+   ArraySetAsSeries(close_M15, true);
+   ArraySetAsSeries(high_M15,  true);
+   ArraySetAsSeries(low_M15,   true);
+   ArraySetAsSeries(time_M15,  true);
+
+   if(CopyOpen (_Symbol, PERIOD_M15, 0, bars, open_M15)  <= 0) return false;
+   if(CopyClose(_Symbol, PERIOD_M15, 0, bars, close_M15) <= 0) return false;
+   if(CopyHigh (_Symbol, PERIOD_M15, 0, bars, high_M15)  <= 0) return false;
+   if(CopyLow  (_Symbol, PERIOD_M15, 0, bars, low_M15)   <= 0) return false;
+   if(CopyTime (_Symbol, PERIOD_M15, 0, bars, time_M15)  <= 0) return false;
+
+   double atr = 0.0;
+   if(g_hLocalATR != INVALID_HANDLE) {
+      double atrBuf[];
+      if(CopyBuffer(g_hLocalATR, 0, 0, 3, atrBuf) >= 3) {
+         atr = atrBuf[1];
+      }
+   }
+   if(atr <= 0.0) {
+      Print("[BREAKER] WARNING: ATR M15 indisponible - detection skipped");
+      return false;
+   }
+
+   const double minBody = 0.3 * atr;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   int n      = ArraySize(close_M15);
+   int maxIdx = MathMin(lookback, n - 2);
+
+   // Scan recent -> ancien. Index 0 = bougie en cours. On laisse place
+   // pour break+retest, donc on commence a i=5.
+   for(int i = 5; i <= maxIdx; i++) {
+      double body = MathAbs(close_M15[i] - open_M15[i]);
+      if(body < minBody) continue;
+
+      bool isBear = (close_M15[i] < open_M15[i]);
+      bool isBull = (close_M15[i] > open_M15[i]);
+
+      double zoneHigh = high_M15[i];
+      double zoneLow  = low_M15[i];
+
+      if(direction == "BUY" && isBear) {
+         bool broken  = false;
+         int  breakBar = -1;
+         for(int j = i - 1; j >= 2; j--) {
+            if(close_M15[j] > zoneHigh) {
+               broken   = true;
+               breakBar = j;
+               break;
+            }
+         }
+         if(!broken) continue;
+
+         if(bid >= zoneLow && bid <= zoneHigh) {
+            outBreaker.found       = true;
+            outBreaker.type        = ICT_PD_OB;
+            outBreaker.zoneHigh    = zoneHigh;
+            outBreaker.zoneLow     = zoneLow;
+            outBreaker.createdBar  = i;
+            outBreaker.createdTime = time_M15[i];
+            outBreaker.strength    = MathMin(100.0, (body / atr) * 30.0);
+            outBreaker.name        = "BREAKER";
+
+            Print("[BREAKER-DETAIL] dir=BUY OB_bar=", i,
+                  " zone=[", DoubleToString(zoneLow, _Digits),
+                  "..", DoubleToString(zoneHigh, _Digits), "]",
+                  " break_bar=", breakBar,
+                  " body/ATR=", DoubleToString(body / atr, 2),
+                  " bid=", DoubleToString(bid, _Digits), " (in_zone)");
+            return true;
+         }
+      }
+      else if(direction == "SELL" && isBull) {
+         bool broken  = false;
+         int  breakBar = -1;
+         for(int j = i - 1; j >= 2; j--) {
+            if(close_M15[j] < zoneLow) {
+               broken   = true;
+               breakBar = j;
+               break;
+            }
+         }
+         if(!broken) continue;
+
+         if(bid >= zoneLow && bid <= zoneHigh) {
+            outBreaker.found       = true;
+            outBreaker.type        = ICT_PD_OB;
+            outBreaker.zoneHigh    = zoneHigh;
+            outBreaker.zoneLow     = zoneLow;
+            outBreaker.createdBar  = i;
+            outBreaker.createdTime = time_M15[i];
+            outBreaker.strength    = MathMin(100.0, (body / atr) * 30.0);
+            outBreaker.name        = "BREAKER";
+
+            Print("[BREAKER-DETAIL] dir=SELL OB_bar=", i,
+                  " zone=[", DoubleToString(zoneLow, _Digits),
+                  "..", DoubleToString(zoneHigh, _Digits), "]",
+                  " break_bar=", breakBar,
+                  " body/ATR=", DoubleToString(body / atr, 2),
+                  " bid=", DoubleToString(bid, _Digits), " (in_zone)");
+            return true;
+         }
+      }
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| CHECK ENTRY CONDITIONS (Dual-mode: API + Local)                   |
 //+------------------------------------------------------------------+
 void CheckEntry() {
@@ -1652,6 +1799,29 @@ void CheckEntry() {
    } else if(Enable_FVG_H1) {
       Print("[FVG-H1-NONE] dir=", direction,
             " | aucune FVG H1 ouverte trouvee (lookback=50 H1)");
+   }
+
+   //================================================================
+   // ETAPE 5 (v2.4) - BREAKER BLOCK BONUS (ICT structure flip)
+   // Une OB violee qui a flippe support/resistance et est actuellement
+   // en retest. Bonus de score Weight_Breaker (default 10). Pareil que
+   // FVG H1 : applique avant scoreThreshold, score cape a 100.
+   //================================================================
+   int breakerBonus = 0;
+   ICT_PDArray breakerBlock;
+   if(Enable_Breaker_Block && DetectBreakerBlock(direction, breakerBlock)) {
+      breakerBonus = Weight_Breaker;
+      int scoreBefore = g_LastSniper.score;
+      g_LastSniper.score = (int)MathMin(100, scoreBefore + breakerBonus);
+      Print("[BREAKER-PASS] dir=", direction,
+            " zone=[", DoubleToString(breakerBlock.zoneLow, _Digits),
+            "..", DoubleToString(breakerBlock.zoneHigh, _Digits), "]",
+            " strength=", DoubleToString(breakerBlock.strength, 0),
+            " bonus=+", breakerBonus,
+            " | score: ", scoreBefore, " -> ", g_LastSniper.score);
+   } else if(Enable_Breaker_Block) {
+      Print("[BREAKER-NONE] dir=", direction,
+            " | aucun Breaker Block en retest (lookback=80 M15)");
    }
 
    if(g_LastSniper.score < scoreThreshold)
