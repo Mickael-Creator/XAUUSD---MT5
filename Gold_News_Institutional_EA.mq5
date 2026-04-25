@@ -1244,6 +1244,58 @@ void EvaluateSellOpportunity(string buyBlockReason, double currentPrice) {
 }
 
 //+------------------------------------------------------------------+
+//| v2.4 PREMIUM/DISCOUNT ARRAY FILTER (2026-04-25)                   |
+//+------------------------------------------------------------------+
+// Verifie que le prix est dans la bonne moitie de la range D1 :
+//   BUY  -> Discount Array (0-50% : Bid <= median D1 precedente)
+//   SELL -> Premium Array  (50-100% : Bid >= median D1 precedente)
+// Filtre binaire : un setup hors zone est rejete (pas de trade contre la
+// structure HTF). Si l'EA ne peut pas lire D1[1] (ex: marche ferme), on
+// degrade en pass-through pour ne pas bloquer artificiellement.
+//+------------------------------------------------------------------+
+bool CheckPremiumDiscountFilter(string direction) {
+   double prevHigh = iHigh(_Symbol, PERIOD_D1, 1);
+   double prevLow  = iLow(_Symbol,  PERIOD_D1, 1);
+
+   if(prevHigh <= 0 || prevLow <= 0 || prevHigh <= prevLow) {
+      // Donnees D1 indisponibles -> on n'impose pas le filtre
+      Print("[PD-FILTER-DECISION] PASS (D1 data unavailable, fail-open)");
+      return true;
+   }
+
+   double median = (prevHigh + prevLow) / 2.0;
+   double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   bool inZone = false;
+   string zone;
+   if(direction == "BUY") {
+      inZone = (bid <= median);
+      zone   = "Discount";
+   } else if(direction == "SELL") {
+      inZone = (bid >= median);
+      zone   = "Premium";
+   } else {
+      // Direction inconnue -> ne pas bloquer
+      return true;
+   }
+
+   if(inZone) {
+      Print("[PD-FILTER-PASS] dir=", direction, " zone=", zone,
+            " bid=", DoubleToString(bid, _Digits),
+            " median=", DoubleToString(median, _Digits),
+            " D1[", DoubleToString(prevLow, _Digits),
+            "..", DoubleToString(prevHigh, _Digits), "]");
+      return true;
+   }
+
+   Print("[PD-FILTER-REJECT] dir=", direction, " zone_attendue=", zone,
+         " bid=", DoubleToString(bid, _Digits),
+         " median=", DoubleToString(median, _Digits),
+         " (hors zone HTF)");
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| CHECK ENTRY CONDITIONS (Dual-mode: API + Local)                   |
 //+------------------------------------------------------------------+
 void CheckEntry() {
@@ -1377,6 +1429,16 @@ void CheckEntry() {
    //================================================================
    if(direction != "BUY" && direction != "SELL")
       REJECT("Direction invalide: " + direction);
+
+   //================================================================
+   // ETAPE 3 (v2.4) - PREMIUM/DISCOUNT ARRAY FILTER
+   // Rejette tout setup hors zone D1 (BUY hors Discount / SELL hors Premium).
+   // Filtre binaire, evalue avant le pipeline CheckAllFilters et avant le
+   // conflict detector pour economiser des appels en aval.
+   //================================================================
+   if(Enable_Premium_Discount_Filter && !CheckPremiumDiscountFilter(direction)) {
+      REJECT("[PD-FILTER] Hors zone HTF (" + (direction == "BUY" ? "Discount" : "Premium") + ")");
+   }
 
    //================================================================
    // CONFLICT DETECTOR (VPS macro vs ICT/LOCAL technical)
