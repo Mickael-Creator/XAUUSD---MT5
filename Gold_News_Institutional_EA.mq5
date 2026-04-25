@@ -1794,13 +1794,28 @@ void CheckEntry() {
 
    // v2.4 (2026-04-25): Force_Direction_Override (debug uniquement) - bypass complet
    // du pipeline de selection de direction. Utilisation : tests manuels en demo.
+   //
+   // v2.4.1 (2026-04-25 audit P2-B): Force_Direction NE bypasse PLUS la protection
+   // news. Si l'API VPS fournit un timingMode actif (BLACKOUT/PRE_NEWS_SETUP/
+   // POST_NEWS_ENTRY) et Use_VPS_News_Protection=true, la gate news en aval
+   // (.mq5 ~1875) bloquera le trade force. Sécurise le mode debug contre une
+   // execution accidentelle en plein NFP / FOMC.
    if(Force_Direction_Override &&
       (Force_Direction_Value == "BUY" || Force_Direction_Value == "SELL")) {
       Print("[FORCE-DIR] Override actif - direction forcee a ", Force_Direction_Value);
       direction    = Force_Direction_Value;
       confidence   = 99.0;
       signalSource = "FORCE";
-      timingMode   = "CLEAR";
+      // v2.4.1: respecter le timingMode API si signal recent (<300s),
+      // sinon fallback CLEAR. La gate Use_VPS_News_Protection decide ensuite.
+      if(g_Signal.is_valid && (TimeCurrent() - g_Signal.last_update) <= 300) {
+         timingMode = g_Signal.timing_mode;
+         Print("[FORCE-DIR] timingMode API conserve = ", timingMode,
+               " (Use_VPS_News_Protection=", (Use_VPS_News_Protection ? "true" : "false"), ")");
+      } else {
+         timingMode = "CLEAR";
+         Print("[FORCE-DIR] API stale, timingMode=CLEAR (fallback)");
+      }
       sizeFactor   = Local_Size_Factor;
       tpMode       = "NORMAL";
       widerStops   = false;
