@@ -672,10 +672,12 @@ void OnTick() {
 
    //================================================================
    // LOG A (2026-04-17) : DIAGNOSTIC SYNTHESE TOUTES LES 60s
-   // Permet de comprendre en temps reel l'etat global du systeme
+   // Permet de comprendre en temps reel l'etat global du systeme.
+   // v2.4.1 (audit P2-E): guarde par Log_Verbose. Si false, le diagnostic
+   // est suprime (ne supprime PAS les logs de trade ouverts ou rejets).
    //================================================================
    static datetime lastDiagLog = 0;
-   if(TimeCurrent() - lastDiagLog >= 60) {
+   if(Log_Verbose && TimeCurrent() - lastDiagLog >= 60) {
       lastDiagLog = TimeCurrent();
 
       double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -1787,6 +1789,35 @@ void CheckEntry() {
       }
    }
 
+   //================================================================
+   // SKIP ROLLOVER (v2.4.1 - audit P2-E)
+   //================================================================
+   // La fenetre 22:00-23:00 GMT est la session de rollover broker : spread
+   // typiquement 5-10x plus large que la normale. Default true => bloque
+   // les nouveaux trades dans cette fenetre. La session par defaut etant
+   // 00:00-21:00, le check est redondant tant que Trading_Session_End
+   // n'est pas pousse au-dela de 21:00. Garde de defense en profondeur.
+   if(Skip_Rollover) {
+      MqlDateTime _dtRoll;
+      TimeCurrent(_dtRoll);
+      if(_dtRoll.hour == 22) {
+         REJECT("Skip_Rollover (fenetre 22:00-23:00 GMT, spread anormal)");
+      }
+   }
+
+   //================================================================
+   // DEBUG TRACE (v2.4.1 - audit P2-E)
+   //================================================================
+   // Use_Debug_Mode=true active des traces additionnelles dans le pipeline.
+   // Default false pour ne pas spammer.
+   if(Use_Debug_Mode) {
+      Print("[DEBUG] CheckEntry pre-signal | throttle_elapsed=",
+            (g_LastTradeTime > 0 ? IntegerToString((int)(TimeCurrent() - g_LastTradeTime)) : "n/a"),
+            "s | TradeThrottleSeconds=", TradeThrottleSeconds,
+            " | trades_today=", g_TradesToday, "/", (int)Max_Daily_Trades,
+            " | api_valid=", (g_Signal.is_valid ? "true" : "false"));
+   }
+
    // === DETERMINER LA SOURCE DU SIGNAL ===
    string direction;
    double confidence;
@@ -2103,13 +2134,16 @@ void CheckEntry() {
    int totalHTFBonus  = fvgH1Bonus + breakerBonus + mitigBonus;
    g_LastSniper.score = (int)MathMin(100, sniperBaseScore + totalHTFBonus);
 
-   Print("[SCORE-V24] dir=", direction,
-         " | base=", sniperBaseScore, "/100",
-         " | FVG_H1=+", fvgH1Bonus,
-         " Breaker=+", breakerBonus,
-         " Mitig=+", mitigBonus,
-         " | total_HTF=+", totalHTFBonus,
-         " | final=", g_LastSniper.score, "/100");
+   // v2.4.1 (audit P2-E): breakdown SCORE-V24 guarde par Log_Verbose.
+   if(Log_Verbose) {
+      Print("[SCORE-V24] dir=", direction,
+            " | base=", sniperBaseScore, "/100",
+            " | FVG_H1=+", fvgH1Bonus,
+            " Breaker=+", breakerBonus,
+            " Mitig=+", mitigBonus,
+            " | total_HTF=+", totalHTFBonus,
+            " | final=", g_LastSniper.score, "/100");
+   }
 
    if(g_LastSniper.score < scoreThreshold)
       REJECT("Score " + IntegerToString(g_LastSniper.score) + "<" + IntegerToString(scoreThreshold) + " (" + g_LastSniper.reason + ")");
