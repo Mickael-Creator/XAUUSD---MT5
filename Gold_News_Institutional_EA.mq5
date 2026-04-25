@@ -2997,15 +2997,23 @@ void SyncOpenPositions() {
 void RecalcDailyStats() {
    datetime dayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
    datetime dayEnd   = dayStart + 86400;  // +24h
+   // v2.4.2 (2026-04-25 audit C2): scan etendu sur hier pour restaurer
+   // g_LastTradeTime cross-jour. Cas vise : trade 23:45 hier + restart EA
+   // 00:15 today => l'ancienne fenetre [today 00:00; tomorrow 00:00] ratait
+   // le DEAL_ENTRY_IN, le throttle TradeThrottleSeconds (3600s) n'etait pas
+   // restaure. Nouvelle fenetre [yesterday 00:00; tomorrow 00:00]. Les
+   // compteurs daily (trades / PnL) restent gates sur dayStart pour ne pas
+   // polluer le bilan du jour.
+   datetime scanStart = dayStart - 86400;  // hier 00:00 (server time)
 
-   if(!HistorySelect(dayStart, dayEnd)) {
+   if(!HistorySelect(scanStart, dayEnd)) {
       Print("[AUDIT-C5] RecalcDailyStats: HistorySelect failed");
       return;
    }
 
    int      tradesCount    = 0;
    double   totalPnL       = 0;
-   datetime lastEntryTime  = 0;  // v2.4.1: dernier DEAL_ENTRY_IN du jour pour throttle
+   datetime lastEntryTime  = 0;  // v2.4.1: dernier DEAL_ENTRY_IN pour throttle
    int      totalDeals     = HistoryDealsTotal();
 
    for(int i = 0; i < totalDeals; i++) {
@@ -3020,20 +3028,23 @@ void RecalcDailyStats() {
       if(dealSym != _Symbol) continue;
 
       ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+      datetime        dealTime  = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
 
-      if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_INOUT) {
-         // Count as a completed trade
-         tradesCount++;
-         totalPnL += HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-         totalPnL += HistoryDealGetDouble(dealTicket, DEAL_SWAP);
-         totalPnL += HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+      // v2.4.2 audit C2: stats daily comptees uniquement sur deals du jour.
+      if(dealTime >= dayStart) {
+         if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_INOUT) {
+            tradesCount++;
+            totalPnL += HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+            totalPnL += HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+            totalPnL += HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+         }
       }
 
       // v2.4.1 (2026-04-25): tracer le dernier DEAL_ENTRY_IN pour persister
       // g_LastTradeTime au restart EA (anti double-trade colle apres reboot).
+      // v2.4.2 audit C2: scan inclut hier => couvre restart cross-jour.
       if(dealEntry == DEAL_ENTRY_IN || dealEntry == DEAL_ENTRY_INOUT) {
-         datetime t = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
-         if(t > lastEntryTime) lastEntryTime = t;
+         if(dealTime > lastEntryTime) lastEntryTime = dealTime;
       }
    }
 
